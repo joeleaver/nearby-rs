@@ -20,6 +20,7 @@ pub mod client;
 pub mod handler;
 pub mod manager;
 pub mod service_id;
+pub mod stream_channel;
 pub mod testing;
 
 #[cfg(feature = "tokio")]
@@ -29,3 +30,4 @@ pub use channel_manager::EndpointChannelManager;
 pub use client::ClientProxy;
 pub use handler::{BaseBwuHandler, BwuHandler, IncomingSocketConnection, MediumBwuHandler};
 pub use manager::{BwuConfig, BwuManager};
+pub use stream_channel::{Cipher, DuplexStream, Pipe, StreamChannel};
