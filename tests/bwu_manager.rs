@@ -21,7 +21,7 @@ use nearby_rs::bwu::{
 };
 use nearby_rs::frames::{
     for_bwu_last_write, for_bwu_safe_to_close, for_bwu_wifi_lan_path_available, from_bytes,
-    ServiceAddress,
+    Exception, ServiceAddress,
 };
 use nearby_rs::mediums::Medium;
 
@@ -114,6 +114,39 @@ impl Fixture {
         let frame = from_bytes(&frame_bytes).expect("frame should parse");
         self.bwu
             .on_incoming_frame(&frame, endpoint_id, &mut self.client, medium);
+    }
+
+    fn records_for(&self, medium: Medium) -> &FakeBwuHandlerHandle {
+        match medium {
+            Medium::WebRtc => &self.web_rtc,
+            Medium::WifiLan => &self.wifi_lan,
+            Medium::WifiDirect => &self.wifi_direct,
+            Medium::WifiHotspot => &self.wifi_hotspot,
+            _ => panic!("no fake handler for {medium:?}"),
+        }
+    }
+
+    /// Drives a full successful upgrade (the `[5]` flow) end to end.
+    fn fully_upgrade_endpoint(
+        &mut self,
+        endpoint_id: &str,
+        initial_medium: Medium,
+        upgrade_medium: Medium,
+    ) -> Arc<FakeEndpointChannel> {
+        self.bwu
+            .initiate_bwu_for_endpoint(&mut self.client, endpoint_id, upgrade_medium);
+        let records = self.records_for(upgrade_medium).clone();
+        let index = records.lock().unwrap().handle_initialize_calls.len() - 1;
+        let upgraded = notify_bwu_manager_of_incoming_connection(
+            &records,
+            upgrade_medium,
+            index,
+            &mut self.bwu,
+            &mut self.client,
+        );
+        self.feed(for_bwu_last_write(), endpoint_id, initial_medium);
+        self.feed(for_bwu_safe_to_close(), endpoint_id, initial_medium);
+        upgraded
     }
 }
 
@@ -271,4 +304,84 @@ fn block_bwu_frame_from_advertiser() {
 
     // The advertiser must not act as the BWU responder.
     assert!(!f.bwu.is_upgrade_ongoing(ENDPOINT_2));
+}
+
+// --- initiate-error cluster ([6]-[10]) -------------------------------------
+
+#[test]
+fn dont_upgrade_if_already_connected_over_requested_medium() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WebRtc);
+    assert_eq!(f.web_rtc.lock().unwrap().handle_initialize_calls.len(), 1);
+
+    // Already connected over WEB_RTC → no new initialize.
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WebRtc);
+    assert_eq!(f.web_rtc.lock().unwrap().handle_initialize_calls.len(), 1);
+}
+
+#[test]
+fn dont_upgrade_from_wifi_lan_to_wifi_hotspot() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::WifiLan);
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WifiHotspot);
+    assert!(f
+        .wifi_hotspot
+        .lock()
+        .unwrap()
+        .handle_initialize_calls
+        .is_empty());
+}
+
+#[test]
+fn no_initial_medium() {
+    let mut f = fixture(true);
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WifiHotspot);
+    for r in [&f.web_rtc, &f.wifi_lan, &f.wifi_direct, &f.wifi_hotspot] {
+        assert!(r.lock().unwrap().handle_initialize_calls.is_empty());
+    }
+}
+
+#[test]
+fn upgrade_already_in_progress() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WebRtc);
+    assert_eq!(f.web_rtc.lock().unwrap().handle_initialize_calls.len(), 1);
+
+    // A second initiate while the first is in progress is ignored.
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WifiLan);
+    assert_eq!(f.web_rtc.lock().unwrap().handle_initialize_calls.len(), 1);
+    assert!(f.wifi_lan.lock().unwrap().handle_initialize_calls.is_empty());
+}
+
+#[test]
+fn failed_to_write_upgrade_path_available_frame() {
+    let mut f = fixture(true);
+    let initial = f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    // Writing the UPGRADE_PATH_AVAILABLE frame will fail.
+    initial.set_write_output(Exception::Io);
+
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WebRtc);
+    // The handler WAS initialized (before the write attempt)...
+    assert_eq!(f.web_rtc.lock().unwrap().handle_initialize_calls.len(), 1);
+    // ...but the write failed, so no in-progress upgrade was recorded.
+    assert!(!f.bwu.is_upgrade_ongoing(ENDPOINT_1));
+    assert_eq!(f.current_medium(ENDPOINT_1), Medium::Bluetooth);
+
+    // A later incoming upgraded connection is dropped (no recorded upgrade).
+    let _upgraded = notify_bwu_manager_of_incoming_connection(
+        &f.web_rtc,
+        Medium::WebRtc,
+        0,
+        &mut f.bwu,
+        &mut f.client,
+    );
+    assert_eq!(f.current_medium(ENDPOINT_1), Medium::Bluetooth);
 }
