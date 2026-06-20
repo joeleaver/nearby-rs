@@ -12,6 +12,8 @@
 //! `ClientProxy` / `BwuHandler` / `BaseBwuHandler` / the fakes / `BwuManager`
 //! are being ported incrementally.
 
+#[cfg(feature = "tokio")]
+pub mod actor;
 pub mod channel;
 pub mod channel_manager;
 pub mod client;
@@ -20,6 +22,8 @@ pub mod manager;
 pub mod service_id;
 pub mod testing;
 
+#[cfg(feature = "tokio")]
+pub use actor::{BwuActor, BwuCommand, BwuHandle};
 pub use channel::{DisconnectionReason, EndpointChannel, SafeDisconnectionResult};
 pub use channel_manager::EndpointChannelManager;
 pub use client::ClientProxy;

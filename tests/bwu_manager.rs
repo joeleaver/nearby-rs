@@ -14,10 +14,8 @@
 //! sim `Mediums`, which the explicit-handler port omits), and the two empty
 //! placeholder tests.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use nearby_rs::bwu::channel::{DisconnectionReason, SafeDisconnectionResult};
 use nearby_rs::bwu::testing::{
@@ -28,9 +26,9 @@ use nearby_rs::bwu::{
     BaseBwuHandler, BwuConfig, BwuHandler, BwuManager, ClientProxy, EndpointChannelManager,
 };
 use nearby_rs::frames::{
-    for_bwu_failure, for_bwu_last_write, for_bwu_safe_to_close,
-    for_bwu_wifi_direct_path_available, for_bwu_wifi_hotspot_path_available,
-    for_bwu_wifi_lan_path_available, from_bytes, Exception, ServiceAddress,
+    for_bwu_failure, for_bwu_last_write, for_bwu_safe_to_close, for_bwu_wifi_direct_path_available,
+    for_bwu_wifi_hotspot_path_available, for_bwu_wifi_lan_path_available, from_bytes, Exception,
+    ServiceAddress,
 };
 use nearby_rs::mediums::Medium;
 use nearby_rs::proto as pb;
@@ -47,7 +45,7 @@ const ENDPOINT_5: &str = "Endpoint5";
 
 struct Fixture {
     client: ClientProxy,
-    ecm: Rc<RefCell<EndpointChannelManager>>,
+    ecm: Arc<Mutex<EndpointChannelManager>>,
     bwu: BwuManager,
     web_rtc: FakeBwuHandlerHandle,
     wifi_lan: FakeBwuHandlerHandle,
@@ -63,7 +61,7 @@ fn make_handler(medium: Medium, records: &FakeBwuHandlerHandle) -> Box<dyn BwuHa
 }
 
 fn fixture(support_multiple_bwu_mediums: bool) -> Fixture {
-    let ecm = Rc::new(RefCell::new(EndpointChannelManager::new()));
+    let ecm = Arc::new(Mutex::new(EndpointChannelManager::new()));
     let web_rtc = FakeBwuHandler::records();
     let wifi_lan = FakeBwuHandler::records();
     let wifi_direct = FakeBwuHandler::records();
@@ -110,18 +108,22 @@ impl Fixture {
         endpoint_id: &str,
         medium: Medium,
     ) -> Arc<FakeEndpointChannel> {
-        self.client.on_connection_initiated(endpoint_id, false, false);
+        self.client
+            .on_connection_initiated(endpoint_id, false, false);
         self.client.on_connection_accepted(endpoint_id);
         let channel = Arc::new(FakeEndpointChannel::new(medium, service_id));
-        self.ecm
-            .borrow_mut()
-            .register_channel_for_endpoint(&self.client, endpoint_id, channel.clone());
+        self.ecm.lock().unwrap().register_channel_for_endpoint(
+            &self.client,
+            endpoint_id,
+            channel.clone(),
+        );
         channel
     }
 
     fn current_medium(&self, endpoint_id: &str) -> Medium {
         self.ecm
-            .borrow()
+            .lock()
+            .unwrap()
             .get_channel_for_endpoint(endpoint_id)
             .unwrap()
             .medium()
@@ -167,7 +169,7 @@ impl Fixture {
     }
 
     fn unregister(&mut self, endpoint_id: &str) {
-        self.ecm.borrow_mut().unregister_channel_for_endpoint(
+        self.ecm.lock().unwrap().unregister_channel_for_endpoint(
             endpoint_id,
             DisconnectionReason::LocalDisconnection,
             SafeDisconnectionResult::SafeDisconnection,
@@ -190,7 +192,14 @@ impl Fixture {
 fn responder_path_available_frame(medium: Medium) -> pb::OfflineFrame {
     let bytes = match medium {
         Medium::WifiDirect => for_bwu_wifi_direct_path_available(
-            "", "", 2143, 2412, false, "123.234.23.1", "NC-WifiDirectTest", "b592f7d3",
+            "",
+            "",
+            2143,
+            2412,
+            false,
+            "123.234.23.1",
+            "NC-WifiDirectTest",
+            "b592f7d3",
         ),
         Medium::WifiHotspot => {
             let creds = pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WifiHotspotCredentials {
@@ -250,17 +259,37 @@ fn initiate_bwu_success(support_multiple: bool) {
             Some(ENDPOINT_1)
         );
     }
-    assert!(f.wifi_lan.lock().unwrap().handle_initialize_calls.is_empty());
-    assert!(f.wifi_hotspot.lock().unwrap().handle_initialize_calls.is_empty());
-    assert!(f.wifi_direct.lock().unwrap().handle_initialize_calls.is_empty());
+    assert!(f
+        .wifi_lan
+        .lock()
+        .unwrap()
+        .handle_initialize_calls
+        .is_empty());
+    assert!(f
+        .wifi_hotspot
+        .lock()
+        .unwrap()
+        .handle_initialize_calls
+        .is_empty());
+    assert!(f
+        .wifi_direct
+        .lock()
+        .unwrap()
+        .handle_initialize_calls
+        .is_empty());
     assert!(f.bwu.is_upgrade_ongoing(ENDPOINT_1));
 
     // The channel has NOT been swapped yet (still Bluetooth).
     assert_eq!(f.current_medium(ENDPOINT_1), Medium::Bluetooth);
 
     // The remote dials in to the new medium and sends CLIENT_INTRODUCTION.
-    let upgraded =
-        notify_bwu_manager_of_incoming_connection(&f.web_rtc, Medium::WebRtc, 0, &mut f.bwu, &mut f.client);
+    let upgraded = notify_bwu_manager_of_incoming_connection(
+        &f.web_rtc,
+        Medium::WebRtc,
+        0,
+        &mut f.bwu,
+        &mut f.client,
+    );
 
     // The channel is now swapped to the upgraded one, and it is paused until the
     // old channel is drained.
@@ -274,7 +303,10 @@ fn initiate_bwu_success(support_multiple: bool) {
 
     assert!(!upgraded.is_paused());
     assert!(initial.is_closed());
-    assert_eq!(initial.disconnection_reason(), DisconnectionReason::Upgraded);
+    assert_eq!(
+        initial.disconnection_reason(),
+        DisconnectionReason::Upgraded
+    );
 }
 
 #[test]
@@ -311,13 +343,21 @@ fn receive_early_last_write_completes_upgrade() {
 
     // LAST_WRITE arrives BEFORE the incoming upgraded connection (early).
     f.feed(for_bwu_last_write(), ENDPOINT_1, Medium::Bluetooth);
-    let upgraded =
-        notify_bwu_manager_of_incoming_connection(&f.web_rtc, Medium::WebRtc, 0, &mut f.bwu, &mut f.client);
+    let upgraded = notify_bwu_manager_of_incoming_connection(
+        &f.web_rtc,
+        Medium::WebRtc,
+        0,
+        &mut f.bwu,
+        &mut f.client,
+    );
     f.feed(for_bwu_safe_to_close(), ENDPOINT_1, Medium::Bluetooth);
 
     assert!(!upgraded.is_paused());
     assert!(initial.is_closed());
-    assert_eq!(initial.disconnection_reason(), DisconnectionReason::Upgraded);
+    assert_eq!(
+        initial.disconnection_reason(),
+        DisconnectionReason::Upgraded
+    );
 }
 
 #[test]
@@ -330,8 +370,13 @@ fn receive_unexpected_last_write_before_upgrade_does_not_wedge() {
     let initial = f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
     f.bwu
         .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WebRtc);
-    let upgraded =
-        notify_bwu_manager_of_incoming_connection(&f.web_rtc, Medium::WebRtc, 0, &mut f.bwu, &mut f.client);
+    let upgraded = notify_bwu_manager_of_incoming_connection(
+        &f.web_rtc,
+        Medium::WebRtc,
+        0,
+        &mut f.bwu,
+        &mut f.client,
+    );
 
     // A second LAST_WRITE during the upgrade, then SAFE_TO_CLOSE.
     f.feed(for_bwu_last_write(), ENDPOINT_1, Medium::Bluetooth);
@@ -352,13 +397,17 @@ fn upgrade_path_available_frame() -> Vec<u8> {
 fn block_bwu_frame_before_accept() {
     let mut f = fixture(true);
     // Register a channel WITHOUT accepting the connection.
-    f.ecm.borrow_mut().register_channel_for_endpoint(
+    f.ecm.lock().unwrap().register_channel_for_endpoint(
         &f.client,
         ENDPOINT_2,
         Arc::new(FakeEndpointChannel::new(Medium::Bluetooth, SERVICE_A)),
     );
 
-    f.feed(upgrade_path_available_frame(), ENDPOINT_2, Medium::Bluetooth);
+    f.feed(
+        upgrade_path_available_frame(),
+        ENDPOINT_2,
+        Medium::Bluetooth,
+    );
 
     // The frame is dropped because the connection isn't accepted yet.
     assert!(!f.bwu.is_upgrade_ongoing(ENDPOINT_2));
@@ -374,13 +423,17 @@ fn block_bwu_frame_from_advertiser() {
     assert!(f.client.is_connection_accepted(ENDPOINT_2));
     f.client.on_connection_accepted(ENDPOINT_2);
     assert!(f.client.is_connected_to_endpoint(ENDPOINT_2));
-    f.ecm.borrow_mut().register_channel_for_endpoint(
+    f.ecm.lock().unwrap().register_channel_for_endpoint(
         &f.client,
         ENDPOINT_2,
         Arc::new(FakeEndpointChannel::new(Medium::Bluetooth, SERVICE_A)),
     );
 
-    f.feed(upgrade_path_available_frame(), ENDPOINT_2, Medium::Bluetooth);
+    f.feed(
+        upgrade_path_available_frame(),
+        ENDPOINT_2,
+        Medium::Bluetooth,
+    );
 
     // The advertiser must not act as the BWU responder.
     assert!(!f.bwu.is_upgrade_ongoing(ENDPOINT_2));
@@ -437,7 +490,12 @@ fn upgrade_already_in_progress() {
     f.bwu
         .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WifiLan);
     assert_eq!(f.web_rtc.lock().unwrap().handle_initialize_calls.len(), 1);
-    assert!(f.wifi_lan.lock().unwrap().handle_initialize_calls.is_empty());
+    assert!(f
+        .wifi_lan
+        .lock()
+        .unwrap()
+        .handle_initialize_calls
+        .is_empty());
 }
 
 #[test]
@@ -481,7 +539,10 @@ fn revert_on_disconnect_multiple_endpoints_flag_enabled() {
     {
         let r = f.web_rtc.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 1);
-        assert_eq!(r.disconnect_calls[0].endpoint_id.as_deref(), Some(ENDPOINT_1));
+        assert_eq!(
+            r.disconnect_calls[0].endpoint_id.as_deref(),
+            Some(ENDPOINT_1)
+        );
         // Not the last endpoint for the medium+service → no handler revert.
         assert!(r.handle_revert_calls.is_empty());
     }
@@ -491,9 +552,15 @@ fn revert_on_disconnect_multiple_endpoints_flag_enabled() {
     {
         let r = f.web_rtc.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 2);
-        assert_eq!(r.disconnect_calls[1].endpoint_id.as_deref(), Some(ENDPOINT_2));
+        assert_eq!(
+            r.disconnect_calls[1].endpoint_id.as_deref(),
+            Some(ENDPOINT_2)
+        );
         assert_eq!(r.handle_revert_calls.len(), 1);
-        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[0].service_id.as_deref(),
+            Some(SERVICE_A_UPGRADE)
+        );
     }
 }
 
@@ -512,7 +579,10 @@ fn revert_on_disconnect_multiple_endpoints_flag_disabled() {
         let r = f.web_rtc.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 1);
         assert_eq!(r.handle_revert_calls.len(), 1);
-        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[0].service_id.as_deref(),
+            Some(SERVICE_A_UPGRADE)
+        );
     }
 
     // Medium already reverted (global medium is now UNKNOWN) → second is a no-op.
@@ -532,7 +602,7 @@ fn revert_on_disconnect_multiple_services_flag_enabled() {
     f.create_initial_endpoint(SERVICE_B, ENDPOINT_2, Medium::Bluetooth);
     f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WifiLan);
     f.fully_upgrade_endpoint(ENDPOINT_2, Medium::Bluetooth, Medium::WifiLan);
-    assert_eq!(f.ecm.borrow().get_connected_endpoints_count(), 2);
+    assert_eq!(f.ecm.lock().unwrap().get_connected_endpoints_count(), 2);
 
     f.unregister(ENDPOINT_1);
     f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_1);
@@ -540,7 +610,10 @@ fn revert_on_disconnect_multiple_services_flag_enabled() {
         let r = f.wifi_lan.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 1);
         assert_eq!(r.handle_revert_calls.len(), 1);
-        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[0].service_id.as_deref(),
+            Some(SERVICE_A_UPGRADE)
+        );
     }
 
     f.unregister(ENDPOINT_2);
@@ -549,7 +622,10 @@ fn revert_on_disconnect_multiple_services_flag_enabled() {
         let r = f.wifi_lan.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 2);
         assert_eq!(r.handle_revert_calls.len(), 2);
-        assert_eq!(r.handle_revert_calls[1].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[1].service_id.as_deref(),
+            Some(SERVICE_B_UPGRADE)
+        );
     }
 }
 
@@ -601,7 +677,10 @@ fn revert_on_disconnect_multiple_services_and_endpoints_flag_enabled() {
         let r = f.web_rtc.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 1);
         assert_eq!(r.handle_revert_calls.len(), 1);
-        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[0].service_id.as_deref(),
+            Some(SERVICE_A_UPGRADE)
+        );
     }
 
     // ep2 / service A / WIFI_LAN (last LAN for A).
@@ -611,7 +690,10 @@ fn revert_on_disconnect_multiple_services_and_endpoints_flag_enabled() {
         let r = f.wifi_lan.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 1);
         assert_eq!(r.handle_revert_calls.len(), 1);
-        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[0].service_id.as_deref(),
+            Some(SERVICE_A_UPGRADE)
+        );
     }
 
     // ep3 / service B / WIFI_LAN (last LAN for B).
@@ -621,7 +703,10 @@ fn revert_on_disconnect_multiple_services_and_endpoints_flag_enabled() {
         let r = f.wifi_lan.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 2);
         assert_eq!(r.handle_revert_calls.len(), 2);
-        assert_eq!(r.handle_revert_calls[1].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[1].service_id.as_deref(),
+            Some(SERVICE_B_UPGRADE)
+        );
     }
 
     // ep4 / service B / WIFI_HOTSPOT.
@@ -631,7 +716,10 @@ fn revert_on_disconnect_multiple_services_and_endpoints_flag_enabled() {
         let r = f.wifi_hotspot.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 1);
         assert_eq!(r.handle_revert_calls.len(), 1);
-        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[0].service_id.as_deref(),
+            Some(SERVICE_B_UPGRADE)
+        );
     }
 
     // ep5 / service B / WIFI_DIRECT.
@@ -641,7 +729,10 @@ fn revert_on_disconnect_multiple_services_and_endpoints_flag_enabled() {
         let r = f.wifi_direct.lock().unwrap();
         assert_eq!(r.disconnect_calls.len(), 1);
         assert_eq!(r.handle_revert_calls.len(), 1);
-        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+        assert_eq!(
+            r.handle_revert_calls[0].service_id.as_deref(),
+            Some(SERVICE_B_UPGRADE)
+        );
     }
 
     // WEB_RTC untouched after the first disconnect.
@@ -659,7 +750,13 @@ fn setup_upgrade_failure(support_multiple: bool) -> Fixture {
     f.bwu
         .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_3, Medium::WebRtc);
     // index 2 = ep3's initialize call on the web_rtc handler.
-    notify_bwu_manager_of_incoming_connection(&f.web_rtc, Medium::WebRtc, 2, &mut f.bwu, &mut f.client);
+    notify_bwu_manager_of_incoming_connection(
+        &f.web_rtc,
+        Medium::WebRtc,
+        2,
+        &mut f.bwu,
+        &mut f.client,
+    );
     f
 }
 
@@ -670,7 +767,10 @@ fn revert_on_upgrade_failure_flag_enabled() {
     f.feed(failure, ENDPOINT_3, Medium::WebRtc);
     let r = f.web_rtc.lock().unwrap();
     assert_eq!(r.handle_revert_calls.len(), 1);
-    assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+    assert_eq!(
+        r.handle_revert_calls[0].service_id.as_deref(),
+        Some(SERVICE_B_UPGRADE)
+    );
 }
 
 #[test]
@@ -695,7 +795,10 @@ fn revert_on_disconnect_wifi_direct_responder() {
     f.on_endpoint_disconnect(SERVICE_A, ENDPOINT_1);
     let r = f.wifi_direct.lock().unwrap();
     assert_eq!(r.disconnect_calls.len(), 1);
-    assert_eq!(r.disconnect_calls[0].endpoint_id.as_deref(), Some(ENDPOINT_1));
+    assert_eq!(
+        r.disconnect_calls[0].endpoint_id.as_deref(),
+        Some(ENDPOINT_1)
+    );
     // Responder reverts for WIFI_DIRECT.
     assert_eq!(r.handle_revert_calls.len(), 1);
 }

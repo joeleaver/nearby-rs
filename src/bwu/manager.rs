@@ -2,10 +2,13 @@
 //!
 //! A faithful port of `connections/implementation/bwu_manager.cc`. Per the
 //! porting spec it is a PLAIN SYNCHRONOUS owned state machine (the C++
-//! `serial_executor_` becomes "run inline"; a Tokio actor would wrap this at the
-//! integration layer). It owns all of its maps, so no locks are needed; the
-//! shared `EndpointChannelManager` is an `Rc<RefCell<_>>` and channels are
-//! `Arc<dyn EndpointChannel>` (a stashed clone survives the upgrade swap).
+//! `serial_executor_` becomes "run inline"; the [`crate::bwu::actor`] Tokio actor
+//! wraps it at the integration layer to provide the single-owner serialization).
+//! It owns all of its bookkeeping maps directly; the `EndpointChannelManager` is
+//! shared as an `Arc<Mutex<_>>` (so the consumer's transport can register
+//! channels) but the manager never holds that lock across a handler/channel
+//! call. Channels are `Arc<dyn EndpointChannel>` (a stashed clone survives the
+//! upgrade swap).
 //!
 //! OMITTED (per spec + project scope): all analytics, dynamic role switch
 //! (`UPGRADE_PATH_REQUEST`/`NeedToSwitchRole`/aliasing), Apple BLE scanning,
@@ -26,10 +29,8 @@
 //! medium-availability check maps to "a handler is registered" since the
 //! platform radio layer (`Mediums`) is omitted.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::bwu::channel::{DisconnectionReason, EndpointChannel};
@@ -84,7 +85,7 @@ impl Default for BwuConfig {
 
 pub struct BwuManager {
     config: BwuConfig,
-    ecm: Rc<RefCell<EndpointChannelManager>>,
+    ecm: Arc<Mutex<EndpointChannelManager>>,
     handlers: HashMap<Medium, Box<dyn BwuHandler>>,
 
     /// Single global upgrade medium (used when `support_multiple_bwu_mediums` is
@@ -117,7 +118,7 @@ pub struct BwuManager {
 
 impl BwuManager {
     pub fn new(
-        ecm: Rc<RefCell<EndpointChannelManager>>,
+        ecm: Arc<Mutex<EndpointChannelManager>>,
         handlers: HashMap<Medium, Box<dyn BwuHandler>>,
         mut config: BwuConfig,
     ) -> Self {
@@ -198,7 +199,9 @@ impl BwuManager {
     ) {
         let proposed_medium = new_medium;
 
-        if self.ecm.borrow().is_wifi_lan_connected() && proposed_medium == Medium::WifiHotspot {
+        if self.ecm.lock().unwrap().is_wifi_lan_connected()
+            && proposed_medium == Medium::WifiHotspot
+        {
             // STA connecting to a hotspot would tear down WIFI_LAN.
             return;
         }
@@ -214,7 +217,11 @@ impl BwuManager {
         // A fresh initiate supersedes any pending retry (bwu_manager.cc:257).
         self.cancel_retry_upgrade_alarm(endpoint_id);
 
-        let channel = self.ecm.borrow().get_channel_for_endpoint(endpoint_id);
+        let channel = self
+            .ecm
+            .lock()
+            .unwrap()
+            .get_channel_for_endpoint(endpoint_id);
         let channel_medium = channel
             .as_ref()
             .map(|c| c.medium())
@@ -334,7 +341,8 @@ impl BwuManager {
         let upgrade_medium = upi_medium(upgrade_path_info);
 
         // WIFI_LAN protection: don't tear down an active WIFI_LAN for a hotspot.
-        if self.ecm.borrow().is_wifi_lan_connected() && upgrade_medium == Medium::WifiHotspot {
+        if self.ecm.lock().unwrap().is_wifi_lan_connected() && upgrade_medium == Medium::WifiHotspot
+        {
             self.run_upgrade_failed_protocol(client, endpoint_id, upgrade_path_info);
             return;
         }
@@ -350,7 +358,12 @@ impl BwuManager {
             if let Some(prev) = self.previous_endpoint_channels.remove(endpoint_id) {
                 prev.close_with_reason(DisconnectionReason::Unfinished);
             }
-            if let Some(cur) = self.ecm.borrow().get_channel_for_endpoint(endpoint_id) {
+            if let Some(cur) = self
+                .ecm
+                .lock()
+                .unwrap()
+                .get_channel_for_endpoint(endpoint_id)
+            {
                 cur.resume();
                 cur.close_with_reason(DisconnectionReason::Unfinished);
             }
@@ -366,17 +379,22 @@ impl BwuManager {
             return;
         }
 
-        let channel =
-            match self.process_bwu_path_available_event_internal(client, endpoint_id, upgrade_path_info) {
-                Some(c) => c,
-                None => {
-                    self.run_upgrade_failed_protocol(client, endpoint_id, upgrade_path_info);
-                    return;
-                }
-            };
+        let channel = match self.process_bwu_path_available_event_internal(
+            client,
+            endpoint_id,
+            upgrade_path_info,
+        ) {
+            Some(c) => c,
+            None => {
+                self.run_upgrade_failed_protocol(client, endpoint_id, upgrade_path_info);
+                return;
+            }
+        };
 
         self.in_progress_upgrades.insert(endpoint_id.to_string());
-        let enable_encryption = !upgrade_path_info.supports_disabling_encryption.unwrap_or(false);
+        let enable_encryption = !upgrade_path_info
+            .supports_disabling_encryption
+            .unwrap_or(false);
         self.run_upgrade_protocol(client, endpoint_id, channel, enable_encryption);
     }
 
@@ -394,7 +412,7 @@ impl BwuManager {
             return None;
         }
         let (service_id, last_local) = {
-            let ecm = self.ecm.borrow();
+            let ecm = self.ecm.lock().unwrap();
             let old_channel = ecm.get_channel_for_endpoint(endpoint_id)?;
             (old_channel.service_id(), old_channel.local_endpoint_id())
         };
@@ -404,23 +422,31 @@ impl BwuManager {
             last_local
         };
 
-        let new_channel = self.handlers.get_mut(&medium).unwrap().create_upgraded_endpoint_channel(
-            client,
-            &service_id,
-            endpoint_id,
-            upgrade_path_info,
-        )?;
+        let new_channel = self
+            .handlers
+            .get_mut(&medium)
+            .unwrap()
+            .create_upgraded_endpoint_channel(
+                client,
+                &service_id,
+                endpoint_id,
+                upgrade_path_info,
+            )?;
 
         let intro = for_bwu_introduction(
             client.local_endpoint_id(),
             &last_local,
-            upgrade_path_info.supports_disabling_encryption.unwrap_or(false),
+            upgrade_path_info
+                .supports_disabling_encryption
+                .unwrap_or(false),
         );
         if !new_channel.write(&intro).ok() {
             new_channel.close();
             return None;
         }
-        if upgrade_path_info.supports_client_introduction_ack.unwrap_or(false)
+        if upgrade_path_info
+            .supports_client_introduction_ack
+            .unwrap_or(false)
             && !read_client_introduction_ack_frame(&new_channel)
         {
             new_channel.close();
@@ -431,8 +457,8 @@ impl BwuManager {
 
     // -- initiator incoming-connection path ---------------------------------
 
-    /// Test hook: inject a ready upgraded channel (the medium-layer
-    /// incoming-connection callback the real handlers fire).
+    /// Test hook alias for [`Self::on_incoming_connection`] (kept for the ported
+    /// oracle tests; new callers use `on_incoming_connection` directly).
     pub fn invoke_on_incoming_connection_for_testing(
         &mut self,
         client: &mut ClientProxy,
@@ -441,7 +467,10 @@ impl BwuManager {
         self.on_incoming_connection(client, connection);
     }
 
-    fn on_incoming_connection(
+    /// The medium-layer "an upgraded socket connected" callback (the C++
+    /// `OnIncomingConnection` bind_front target). Reads the remote's
+    /// `CLIENT_INTRODUCTION`, acks it, and runs the upgrade protocol.
+    pub fn on_incoming_connection(
         &mut self,
         client: &mut ClientProxy,
         connection: IncomingSocketConnection,
@@ -484,12 +513,17 @@ impl BwuManager {
         // old one is fully drained.
         new_channel.pause();
 
-        let old_channel = match self.ecm.borrow().get_channel_for_endpoint(endpoint_id) {
+        let old_channel = match self
+            .ecm
+            .lock()
+            .unwrap()
+            .get_channel_for_endpoint(endpoint_id)
+        {
             Some(c) => c,
             None => return,
         };
 
-        self.ecm.borrow_mut().replace_channel_for_endpoint(
+        self.ecm.lock().unwrap().replace_channel_for_endpoint(
             client,
             endpoint_id,
             new_channel,
@@ -549,7 +583,12 @@ impl BwuManager {
         let _ = prev.read();
         prev.close_with_reason(DisconnectionReason::Upgraded);
 
-        let channel = match self.ecm.borrow().get_channel_for_endpoint(endpoint_id) {
+        let channel = match self
+            .ecm
+            .lock()
+            .unwrap()
+            .get_channel_for_endpoint(endpoint_id)
+        {
             Some(c) => c,
             None => return, // NB: in_progress_upgrades is intentionally NOT erased here.
         };
@@ -569,11 +608,19 @@ impl BwuManager {
         endpoint_id: &str,
         upgrade_path_info: &UpgradePathInfo,
     ) {
-        let channel = match self.ecm.borrow().get_channel_for_endpoint(endpoint_id) {
+        let channel = match self
+            .ecm
+            .lock()
+            .unwrap()
+            .get_channel_for_endpoint(endpoint_id)
+        {
             Some(c) => c,
             None => return,
         };
-        if !channel.write(&for_bwu_failure(upgrade_path_info.clone())).ok() {
+        if !channel
+            .write(&for_bwu_failure(upgrade_path_info.clone()))
+            .ok()
+        {
             channel.close_with_reason(DisconnectionReason::IoError);
             return;
         }
@@ -597,14 +644,15 @@ impl BwuManager {
         // With the single global medium (flag disabled), we can only switch
         // mediums if there's at most one connected endpoint.
         if !self.config.support_multiple_bwu_mediums
-            && self.ecm.borrow().get_connected_endpoints_count() > 1
+            && self.ecm.lock().unwrap().get_connected_endpoints_count() > 1
         {
             return;
         }
 
         let service_id = self
             .ecm
-            .borrow()
+            .lock()
+            .unwrap()
             .get_channel_for_endpoint(endpoint_id)
             .map(|c| c.service_id())
             .unwrap_or_else(|| UNKNOWN_SERVICE_ID.to_string());
@@ -644,7 +692,8 @@ impl BwuManager {
 
         let current_medium = self
             .ecm
-            .borrow()
+            .lock()
+            .unwrap()
             .get_channel_for_endpoint(endpoint_id)
             .map(|c| c.medium())
             .unwrap_or(Medium::UnknownMedium);
@@ -739,6 +788,16 @@ impl BwuManager {
         self.retry_upgrade_alarms.get(endpoint_id).copied()
     }
 
+    /// Every endpoint with a scheduled-but-not-yet-fired retry and its delay.
+    /// The integration layer reconciles its set of armed timers against this
+    /// after each operation (arm new ones, drop cancelled ones).
+    pub fn pending_retry_delays(&self) -> Vec<(String, Duration)> {
+        self.retry_upgrade_alarms
+            .iter()
+            .map(|(ep, d)| (ep.clone(), *d))
+            .collect()
+    }
+
     /// Fires the scheduled retry for `endpoint_id` (the integration layer calls
     /// this when the armed timer elapses). No-op if the alarm was cancelled or
     /// already fired, or if the endpoint is no longer connected. Mirrors the
@@ -798,7 +857,7 @@ impl BwuManager {
         self.successfully_upgraded_endpoints.remove(endpoint_id);
 
         if self.config.support_multiple_bwu_mediums
-            || self.ecm.borrow().get_connected_endpoints_count() <= 1
+            || self.ecm.lock().unwrap().get_connected_endpoints_count() <= 1
         {
             self.revert_bwu_medium_for_endpoint(service_id, endpoint_id);
         }
@@ -811,7 +870,10 @@ impl BwuManager {
             // Coarse: reset the single global medium and revert ALL services.
             self.medium = Medium::UnknownMedium;
             if self.has_handler_for_medium(medium) {
-                self.handlers.get_mut(&medium).unwrap().revert_initiator_state();
+                self.handlers
+                    .get_mut(&medium)
+                    .unwrap()
+                    .revert_initiator_state();
             }
             return;
         }
@@ -858,7 +920,9 @@ fn upi_medium(upgrade_path_info: &UpgradePathInfo) -> Medium {
         .and_then(|v| {
             pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::try_from(v).ok()
         })
-        .unwrap_or(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::UnknownMedium);
+        .unwrap_or(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::UnknownMedium,
+        );
     upgrade_path_info_medium_to_medium(m)
 }
 
@@ -875,9 +939,7 @@ fn read_client_introduction_frame(
     // TODO(port): 5s read timeout (the C++ CancelableAlarm closes the channel).
     let data = channel.read().ok()?;
     let frame = from_bytes(&data).ok()?;
-    let bwu = frame
-        .v1
-        .and_then(|v1| v1.bandwidth_upgrade_negotiation)?;
+    let bwu = frame.v1.and_then(|v1| v1.bandwidth_upgrade_negotiation)?;
     if bwu.event_type != Some(EventType::ClientIntroduction as i32) {
         return None;
     }

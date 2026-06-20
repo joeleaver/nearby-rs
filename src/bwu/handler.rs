@@ -31,7 +31,10 @@ pub struct IncomingSocketConnection {
 }
 
 /// The full handler interface `BwuManager` uses (the C++ `BwuHandler`).
-pub trait BwuHandler {
+///
+/// `Send` so the manager (and the Tokio actor wrapping it) can be moved to a
+/// dedicated runtime thread.
+pub trait BwuHandler: Send {
     /// Initiator: set up the upgraded medium and return the serialized
     /// `UPGRADE_PATH_AVAILABLE` bytes. An EMPTY return signals failure
     /// (the `MEDIUM_ERROR` path in `BwuManager`).
@@ -70,7 +73,9 @@ pub trait BwuHandler {
 
 /// The medium-specific operations a concrete handler implements (the C++
 /// `Handle*` virtuals plus the non-bookkeeping leaf methods).
-pub trait MediumBwuHandler {
+///
+/// `Send` so a [`BaseBwuHandler`] wrapping it satisfies [`BwuHandler`]'s `Send`.
+pub trait MediumBwuHandler: Send {
     fn handle_initialize_upgraded_medium_for_endpoint(
         &mut self,
         client: &ClientProxy,
@@ -188,8 +193,12 @@ impl<H: MediumBwuHandler> BwuHandler for BaseBwuHandler<H> {
         endpoint_id: &str,
         upgrade_path_info: &UpgradePathInfo,
     ) -> Option<Arc<dyn EndpointChannel>> {
-        self.inner
-            .create_upgraded_endpoint_channel(client, service_id, endpoint_id, upgrade_path_info)
+        self.inner.create_upgraded_endpoint_channel(
+            client,
+            service_id,
+            endpoint_id,
+            upgrade_path_info,
+        )
     }
 
     fn get_upgrade_medium(&self) -> Medium {
@@ -251,7 +260,8 @@ mod tests {
         let client = ClientProxy::default();
         let mut handler = BaseBwuHandler::new(RecordingHandler::default());
 
-        let frame = handler.initialize_upgraded_medium_for_endpoint(&client, "ServiceA", "Endpoint1");
+        let frame =
+            handler.initialize_upgraded_medium_for_endpoint(&client, "ServiceA", "Endpoint1");
         assert_eq!(frame, vec![1]);
         // HandleInitialize is called with the WRAPPED id.
         assert_eq!(
@@ -267,7 +277,8 @@ mod tests {
             fail_for: Some("Endpoint1".to_string()),
             ..Default::default()
         });
-        let frame = handler.initialize_upgraded_medium_for_endpoint(&client, "ServiceA", "Endpoint1");
+        let frame =
+            handler.initialize_upgraded_medium_for_endpoint(&client, "ServiceA", "Endpoint1");
         assert!(frame.is_empty());
         // Not tracked → reverting the endpoint does nothing.
         handler.revert_initiator_state_for_endpoint("ServiceA_UPGRADE", "Endpoint1");
@@ -286,7 +297,10 @@ mod tests {
         assert!(handler.inner().revert_calls.is_empty());
         // Last endpoint reverted: handler revert fires once with the wrapped id.
         handler.revert_initiator_state_for_endpoint("ServiceA_UPGRADE", "Endpoint2");
-        assert_eq!(handler.inner().revert_calls, vec!["ServiceA_UPGRADE".to_string()]);
+        assert_eq!(
+            handler.inner().revert_calls,
+            vec!["ServiceA_UPGRADE".to_string()]
+        );
     }
 
     #[test]

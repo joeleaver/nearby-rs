@@ -8,10 +8,8 @@
 //! real `UPGRADE_FAILURE` dispatch path plus the alarm seam
 //! (`pending_retry_delay` / `fire_retry_alarm`) the Phase-3 Tokio actor will use.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nearby_rs::bwu::testing::{FakeBwuHandler, FakeBwuHandlerHandle, FakeEndpointChannel};
@@ -31,7 +29,7 @@ fn secs(n: u64) -> Duration {
 
 struct Harness {
     client: ClientProxy,
-    ecm: Rc<RefCell<EndpointChannelManager>>,
+    ecm: Arc<Mutex<EndpointChannelManager>>,
     bwu: BwuManager,
     records: HashMap<Medium, FakeBwuHandlerHandle>,
 }
@@ -39,7 +37,7 @@ struct Harness {
 impl Harness {
     /// Builds a manager with handlers for `mediums` and the given retry config.
     fn new(mediums: &[Medium], config: BwuConfig) -> Self {
-        let ecm = Rc::new(RefCell::new(EndpointChannelManager::new()));
+        let ecm = Arc::new(Mutex::new(EndpointChannelManager::new()));
         let mut handlers: HashMap<Medium, Box<dyn BwuHandler>> = HashMap::new();
         let mut records = HashMap::new();
         for &m in mediums {
@@ -69,7 +67,8 @@ impl Harness {
             .set_upgrade_mediums(endpoint_id, upgrade_mediums.to_vec());
         let channel = Arc::new(FakeEndpointChannel::new(channel_medium, SERVICE_A));
         self.ecm
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .register_channel_for_endpoint(&self.client, endpoint_id, channel);
     }
 
@@ -256,8 +255,12 @@ fn disconnect_resets_backoff_and_cancels_alarm() {
     h.feed_failure(E1, Medium::WebRtc);
     assert_eq!(h.bwu.pending_retry_delay(E1), Some(secs(3)));
 
-    h.bwu
-        .on_endpoint_disconnect(&mut h.client, SERVICE_A, E1, nearby_rs::bwu::channel::DisconnectionReason::LocalDisconnection);
+    h.bwu.on_endpoint_disconnect(
+        &mut h.client,
+        SERVICE_A,
+        E1,
+        nearby_rs::bwu::channel::DisconnectionReason::LocalDisconnection,
+    );
     // The pending alarm is cancelled...
     assert_eq!(h.bwu.pending_retry_delay(E1), None);
 

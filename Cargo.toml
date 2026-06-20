@@ -11,8 +11,19 @@ keywords = ["nearby", "quick-share", "protocol", "p2p"]
 categories = ["network-programming", "encoding"]
 exclude = [".github/"]
 
+[features]
+# Enables the Tokio integration actor (`bwu::actor`) that serializes access to
+# the synchronous BwuManager and drives the retry timer. The core crate is
+# runtime-agnostic; this feature is the only thing that pulls in Tokio.
+tokio = ["dep:tokio"]
+
 [dependencies]
 prost = "0.13"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
+
+[dev-dependencies]
+# `test-util` provides the paused-clock helpers the actor tests use.
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "test-util"] }
 
 [build-dependencies]
 prost-build = "0.13"
