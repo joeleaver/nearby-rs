@@ -1,10 +1,18 @@
-//! Port of the core cases of Google "Nearby" `bwu_manager_test.cc`.
+//! Port of Google "Nearby" `bwu_manager_test.cc`.
 //!
-//! Covered here: the canonical upgrade flow (`InitiateBwu_Success`, run with both
-//! `support_multiple_bwu_mediums` values), the no-crash unexpected-frame cases,
-//! the out-of-order LAST_WRITE cases, and the two frame-blocking cases. The
-//! revert/disconnect cluster and the initiate-error cluster land in follow-ups;
-//! the dynamic-role-switch tests are intentionally omitted (out of scope).
+//! All 23 portable oracle cases are ported: the canonical upgrade flow
+//! (`InitiateBwu_Success`, both `support_multiple_bwu_mediums` values), the
+//! initiate-error guards, the unexpected/out-of-order frame cases, the two
+//! frame-blocking cases, and the full revert/disconnect cluster (incl. the
+//! flag-disabled off-by-one, multi-service/multi-medium independence, the
+//! upgrade-failure revert, and responder hotspot/wifi-direct/wifi-lan revert).
+//!
+//! The 9 unported cases are out of scope: the dynamic-role-switch tests
+//! (`InitiateBwu_NeedToSwitchRole_*`, `ProcessUpgradePathRequest_*`,
+//! `OnIncomingConnection_EndpointAliasesToLastEndpointId`), `AllowToUpgradeMedium`
+//! (relies on the constructor's `InitBwuHandlers` auto-creating handlers from
+//! sim `Mediums`, which the explicit-handler port omits), and the two empty
+//! placeholder tests.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

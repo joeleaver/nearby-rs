@@ -12,10 +12,14 @@
 //! `ChooseBestUpgradeMedium`/`StripOutUnavailableMediums` (tests pass an explicit
 //! medium + explicit handlers), and the dead `safe_to_close_write_timestamps_`.
 //!
-//! Status: the canonical upgrade flow + dispatch + out-of-order handling are in
-//! place. The failure/retry machinery (`ProcessUpgradeFailureEvent`,
-//! `TryNextBestUpgradeMediums`, retry alarms) and `OnEndpointDisconnect`/revert
-//! are still being ported (marked TODO).
+//! Status: the full synchronous state machine the 23-case `bwu_manager_test`
+//! oracle exercises is in place — initiate, dispatch, the responder path, the
+//! converged upgrade protocol, out-of-order handling, and
+//! `OnEndpointDisconnect`/revert (both feature-flag branches). The only deferred
+//! piece is the retry machinery (`TryNextBestUpgradeMediums` /
+//! `RetryUpgradesAfterDelay` / retry alarms): it is untested by the oracle and
+//! is entangled with the omitted `ChooseBestUpgradeMedium`/`Mediums` and the
+//! async timer layer, so it belongs with the Tokio-actor integration (Phase 3).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
