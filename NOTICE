@@ -1,0 +1,29 @@
+nearby-rs
+Copyright (c) 2026 Joe Leaver
+
+This product is a partial Rust port of Google's "Nearby" project
+(https://github.com/google/nearby), which is licensed under the Apache
+License, Version 2.0.
+
+Portions of this software are derived from Nearby, Copyright Google LLC,
+specifically:
+
+  * proto/offline_wire_formats.proto — vendored verbatim from
+    connections/implementation/proto/offline_wire_formats.proto
+
+  * src/frames.rs — ported from
+    connections/implementation/offline_frames.cc
+
+  * src/validator.rs — ported from
+    connections/implementation/offline_frames_validator.cc
+
+  * tests/offline_frames.rs — ported from
+    connections/implementation/offline_frames_test.cc
+
+  * tests/offline_frames_validator.rs — ported from
+    connections/implementation/offline_frames_validator_test.cc
+
+A copy of the Apache License, Version 2.0 governing the upstream material is
+provided in LICENSE-APACHE. The Rust-original portions of this crate are
+additionally available under the MIT license (LICENSE-MIT); the project as a
+whole is offered under "MIT OR Apache-2.0".
