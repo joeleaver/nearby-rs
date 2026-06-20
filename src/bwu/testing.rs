@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::bwu::channel::{DisconnectionReason, EndpointChannel};
 use crate::bwu::client::ClientProxy;
-use crate::bwu::handler::MediumBwuHandler;
+use crate::bwu::handler::{IncomingSocketConnection, MediumBwuHandler};
+use crate::bwu::manager::BwuManager;
 use crate::frames::{
-    for_bwu_bluetooth_path_available, for_bwu_webrtc_path_available,
+    for_bwu_bluetooth_path_available, for_bwu_introduction, for_bwu_webrtc_path_available,
     for_bwu_wifi_direct_path_available, for_bwu_wifi_hotspot_path_available,
     for_bwu_wifi_lan_path_available, Exception, ServiceAddress,
 };
@@ -280,6 +281,34 @@ impl MediumBwuHandler for FakeBwuHandler {
                 ..Default::default()
             });
     }
+}
+
+/// Mirrors `FakeBwuHandler::NotifyBwuManagerOfIncomingConnection`: builds a new
+/// `FakeEndpointChannel` preloaded with the `CLIENT_INTRODUCTION` frame for the
+/// `handle_initialize_calls[index]` call, and drives it into the `BwuManager` as
+/// an incoming upgraded connection. Returns the upgraded channel for inspection.
+pub fn notify_bwu_manager_of_incoming_connection(
+    records: &FakeBwuHandlerHandle,
+    medium: Medium,
+    index: usize,
+    bwu_manager: &mut BwuManager,
+    client: &mut ClientProxy,
+) -> Arc<FakeEndpointChannel> {
+    let (service_id, endpoint_id) = {
+        let r = records.lock().unwrap();
+        let init = &r.handle_initialize_calls[index];
+        (
+            init.service_id.clone().unwrap(),
+            init.endpoint_id.clone().unwrap(),
+        )
+    };
+    let channel = Arc::new(FakeEndpointChannel::new(medium, &service_id));
+    channel.set_read_output(Ok(for_bwu_introduction(&endpoint_id, "", false)));
+    let connection = IncomingSocketConnection {
+        channel: channel.clone(),
+    };
+    bwu_manager.invoke_on_incoming_connection_for_testing(client, connection);
+    channel
 }
 
 #[cfg(test)]
