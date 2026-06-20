@@ -84,14 +84,16 @@ mod tests {
         assert_eq!(ecm.get_connected_endpoints_count(), 0);
         assert!(!ecm.is_wifi_lan_connected());
 
-        let bt: Arc<dyn EndpointChannel> = Arc::new(FakeEndpointChannel::new(Medium::Bluetooth, "A"));
+        let bt: Arc<dyn EndpointChannel> =
+            Arc::new(FakeEndpointChannel::new(Medium::Bluetooth, "A"));
         ecm.register_channel_for_endpoint(&client, "Endpoint1", bt.clone());
         assert_eq!(ecm.get_connected_endpoints_count(), 1);
         assert!(!ecm.is_wifi_lan_connected());
 
         // A stashed clone of the original channel survives the swap.
         let stashed = ecm.get_channel_for_endpoint("Endpoint1").unwrap();
-        let lan: Arc<dyn EndpointChannel> = Arc::new(FakeEndpointChannel::new(Medium::WifiLan, "A"));
+        let lan: Arc<dyn EndpointChannel> =
+            Arc::new(FakeEndpointChannel::new(Medium::WifiLan, "A"));
         ecm.replace_channel_for_endpoint(&client, "Endpoint1", lan, false);
         assert_eq!(ecm.get_connected_endpoints_count(), 1); // swap, not a new endpoint
         assert!(ecm.is_wifi_lan_connected());

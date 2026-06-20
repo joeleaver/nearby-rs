@@ -214,7 +214,14 @@ impl FakeBwuHandler {
                 for_bwu_wifi_hotspot_path_available(credentials, false)
             }
             Medium::WifiDirect => for_bwu_wifi_direct_path_available(
-                "", "", 2143, 2412, false, "123.234.23.1", "NC-WifiDirectTest", "b592f7d3",
+                "",
+                "",
+                2143,
+                2412,
+                false,
+                "123.234.23.1",
+                "NC-WifiDirectTest",
+                "b592f7d3",
             ),
             _ => Vec::new(),
         }
@@ -362,7 +369,12 @@ mod tests {
                 FrameType::BandwidthUpgradeNegotiation
             );
             assert_eq!(
-                handler.records.lock().unwrap().handle_initialize_calls.len(),
+                handler
+                    .records
+                    .lock()
+                    .unwrap()
+                    .handle_initialize_calls
+                    .len(),
                 1
             );
         }

@@ -227,7 +227,12 @@ pub fn for_connection_request_presence(
         // proto2 accessor yields "" when unset and the setter marks the field
         // present, so an unset device endpoint_id still emits a present-but-empty
         // endpoint_id on the wire.
-        req.endpoint_id = Some(proto_presence_device.endpoint_id.clone().unwrap_or_default());
+        req.endpoint_id = Some(
+            proto_presence_device
+                .endpoint_id
+                .clone()
+                .unwrap_or_default(),
+        );
     }
     req.device = Some(pb::connection_request_frame::Device::PresenceDevice(
         proto_presence_device,
@@ -314,7 +319,9 @@ pub fn for_payload_ack_payload_transfer(payload_id: i64) -> Vec<u8> {
     })
 }
 
-fn bwu_upgrade_path_available(upgrade_path_info: pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo) -> Vec<u8> {
+fn bwu_upgrade_path_available(
+    upgrade_path_info: pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo,
+) -> Vec<u8> {
     let sub = pb::BandwidthUpgradeNegotiationFrame {
         event_type: Some(
             pb::bandwidth_upgrade_negotiation_frame::EventType::UpgradePathAvailable as i32,
@@ -333,7 +340,9 @@ pub fn for_bwu_wifi_hotspot_path_available(
     supports_disabling_encryption: bool,
 ) -> Vec<u8> {
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
-        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiHotspot as i32),
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiHotspot as i32,
+        ),
         supports_client_introduction_ack: Some(true),
         supports_disabling_encryption: Some(supports_disabling_encryption),
         wifi_hotspot_credentials: Some(credentials),
@@ -344,7 +353,8 @@ pub fn for_bwu_wifi_hotspot_path_available(
 
 /// Builds a BWU `UPGRADE_PATH_AVAILABLE` for `WIFI_LAN`.
 pub fn for_bwu_wifi_lan_path_available(addresses: &[ServiceAddress]) -> Vec<u8> {
-    let mut socket = pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WifiLanSocket::default();
+    let mut socket =
+        pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WifiLanSocket::default();
     if let Some(last_address) = addresses.last() {
         // For compatibility with Android versions, only use IPv4 address.
         // IPv4 addresses are always at the end of the list.
@@ -353,11 +363,15 @@ pub fn for_bwu_wifi_lan_path_available(addresses: &[ServiceAddress]) -> Vec<u8> 
             socket.wifi_port = Some(last_address.port);
         }
         for address in addresses {
-            socket.address_candidates.push(service_address_to_proto(address));
+            socket
+                .address_candidates
+                .push(service_address_to_proto(address));
         }
     }
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
-        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiLan as i32),
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiLan as i32,
+        ),
         supports_client_introduction_ack: Some(true),
         wifi_lan_socket: Some(socket),
         ..Default::default()
@@ -378,7 +392,9 @@ pub fn for_bwu_awdl_path_available(
         password: Some(password.to_owned()),
     };
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
-        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::Awdl as i32),
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::Awdl as i32,
+        ),
         supports_client_introduction_ack: Some(true),
         supports_disabling_encryption: Some(supports_disabling_encryption),
         awdl_credentials: Some(creds),
@@ -394,16 +410,19 @@ pub fn for_bwu_wifi_aware_path_available(
     password: &str,
     supports_disabling_encryption: bool,
 ) -> Vec<u8> {
-    let mut creds = pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WifiAwareCredentials {
-        service_id: Some(service_id.to_owned()),
-        service_info: Some(service_info.to_vec()),
-        password: None,
-    };
+    let mut creds =
+        pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WifiAwareCredentials {
+            service_id: Some(service_id.to_owned()),
+            service_info: Some(service_info.to_vec()),
+            password: None,
+        };
     if !password.is_empty() {
         creds.password = Some(password.to_owned());
     }
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
-        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiAware as i32),
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiAware as i32,
+        ),
         supports_client_introduction_ack: Some(true),
         supports_disabling_encryption: Some(supports_disabling_encryption),
         wifi_aware_credentials: Some(creds),
@@ -435,7 +454,9 @@ pub fn for_bwu_wifi_direct_path_available(
         ..Default::default()
     };
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
-        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiDirect as i32),
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WifiDirect as i32,
+        ),
         supports_client_introduction_ack: Some(true),
         supports_disabling_encryption: Some(supports_disabling_encryption),
         wifi_direct_credentials: Some(creds),
@@ -451,7 +472,9 @@ pub fn for_bwu_bluetooth_path_available(service_id: &str, mac_address: &str) -> 
         mac_address: Some(mac_address.to_owned()),
     };
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
-        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::Bluetooth as i32),
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::Bluetooth as i32,
+        ),
         supports_client_introduction_ack: Some(true),
         bluetooth_credentials: Some(creds),
         ..Default::default()
@@ -466,7 +489,9 @@ pub fn for_bwu_webrtc_path_available(peer_id: &str, location_hint: pb::LocationH
         location_hint: Some(location_hint),
     };
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
-        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WebRtc as i32),
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WebRtc as i32,
+        ),
         supports_client_introduction_ack: Some(true),
         web_rtc_credentials: Some(creds),
         ..Default::default()
@@ -475,9 +500,7 @@ pub fn for_bwu_webrtc_path_available(peer_id: &str, location_hint: pb::LocationH
 }
 
 /// Builds a BWU `UPGRADE_FAILURE` carrying the failed upgrade path.
-pub fn for_bwu_failure(
-    info: pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo,
-) -> Vec<u8> {
+pub fn for_bwu_failure(info: pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo) -> Vec<u8> {
     let sub = pb::BandwidthUpgradeNegotiationFrame {
         event_type: Some(pb::bandwidth_upgrade_negotiation_frame::EventType::UpgradeFailure as i32),
         upgrade_path_info: Some(info),
@@ -559,13 +582,14 @@ pub fn for_bwu_path_request(
     mediums: &[Medium],
     medium_role: pb::MediumRole,
 ) -> Vec<u8> {
-    let mut request = pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::UpgradePathRequest {
-        mediums: mediums
-            .iter()
-            .map(|m| medium_to_upgrade_path_info_medium(*m) as i32)
-            .collect(),
-        medium_meta_data: Some(pb::MediumMetadata::default()),
-    };
+    let mut request =
+        pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::UpgradePathRequest {
+            mediums: mediums
+                .iter()
+                .map(|m| medium_to_upgrade_path_info_medium(*m) as i32)
+                .collect(),
+            medium_meta_data: Some(pb::MediumMetadata::default()),
+        };
     request.medium_meta_data.as_mut().unwrap().medium_role = Some(medium_role);
     let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
         medium: Some(medium_to_upgrade_path_info_medium(medium) as i32),
@@ -602,7 +626,10 @@ pub fn for_keep_alive_ack(ack: bool, seq_num: u32) -> Vec<u8> {
 }
 
 /// Builds a `DISCONNECTION`.
-pub fn for_disconnection(request_safe_to_disconnect: bool, ack_safe_to_disconnect: bool) -> Vec<u8> {
+pub fn for_disconnection(
+    request_safe_to_disconnect: bool,
+    ack_safe_to_disconnect: bool,
+) -> Vec<u8> {
     encode_v1(pb::v1_frame::FrameType::Disconnection, |v1| {
         v1.disconnection = Some(pb::DisconnectionFrame {
             request_safe_to_disconnect: Some(request_safe_to_disconnect),
@@ -800,8 +827,8 @@ mod tests {
             endpoint_id: None,
             ..Default::default()
         };
-        let frame = pb::OfflineFrame::decode(&for_connection_request_presence(device, &info)[..])
-            .unwrap();
+        let frame =
+            pb::OfflineFrame::decode(&for_connection_request_presence(device, &info)[..]).unwrap();
         let req = frame.v1.unwrap().connection_request.unwrap();
         assert_eq!(req.endpoint_id, Some(String::new()));
     }

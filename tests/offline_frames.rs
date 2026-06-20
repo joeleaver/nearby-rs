@@ -12,10 +12,10 @@ use nearby_rs::mediums::{Medium, WifiDirectAuthType};
 use nearby_rs::proto as pb;
 use prost::Message;
 
+use bwu::upgrade_path_info as upi;
 use pb::bandwidth_upgrade_negotiation_frame as bwu;
 use pb::offline_frame::Version;
 use pb::v1_frame::FrameType;
-use bwu::upgrade_path_info as upi;
 
 // --- shared fixtures (mirror the C++ constexpr constants) -------------------
 
@@ -31,7 +31,17 @@ const KEEP_ALIVE_TIMEOUT_MILLIS: i32 = 5000;
 fn k_mediums() -> Vec<Medium> {
     use Medium::*;
     vec![
-        Mdns, Bluetooth, WifiHotspot, Ble, WifiLan, WifiAware, Nfc, WifiDirect, WebRtc, Usb, Awdl,
+        Mdns,
+        Bluetooth,
+        WifiHotspot,
+        Ble,
+        WifiLan,
+        WifiAware,
+        Nfc,
+        WifiDirect,
+        WebRtc,
+        Usb,
+        Awdl,
     ]
 }
 
@@ -39,7 +49,17 @@ fn k_mediums() -> Vec<Medium> {
 fn expected_mediums() -> Vec<i32> {
     use pb::connection_request_frame::Medium::*;
     vec![
-        Mdns, Bluetooth, WifiHotspot, Ble, WifiLan, WifiAware, Nfc, WifiDirect, WebRtc, Usb, Awdl,
+        Mdns,
+        Bluetooth,
+        WifiHotspot,
+        Ble,
+        WifiLan,
+        WifiAware,
+        Nfc,
+        WifiDirect,
+        WebRtc,
+        Usb,
+        Awdl,
     ]
     .into_iter()
     .map(|m| m as i32)
@@ -179,7 +199,9 @@ fn can_generate_connections_connection_request() {
             mediums: expected_mediums(),
             keep_alive_interval_millis: Some(KEEP_ALIVE_INTERVAL_MILLIS),
             keep_alive_timeout_millis: Some(KEEP_ALIVE_TIMEOUT_MILLIS),
-            device: Some(pb::connection_request_frame::Device::ConnectionsDevice(device)),
+            device: Some(pb::connection_request_frame::Device::ConnectionsDevice(
+                device,
+            )),
             ..Default::default()
         });
     });
@@ -213,7 +235,9 @@ fn can_generate_presence_connection_request() {
             mediums: expected_mediums(),
             keep_alive_interval_millis: Some(KEEP_ALIVE_INTERVAL_MILLIS),
             keep_alive_timeout_millis: Some(KEEP_ALIVE_TIMEOUT_MILLIS),
-            device: Some(pb::connection_request_frame::Device::PresenceDevice(presence_device)),
+            device: Some(pb::connection_request_frame::Device::PresenceDevice(
+                presence_device,
+            )),
             ..Default::default()
         });
     });
@@ -257,7 +281,9 @@ fn for_connection_request_connections_populates_wifi_direct_auth_types() {
             mediums: expected_mediums(),
             keep_alive_interval_millis: Some(KEEP_ALIVE_INTERVAL_MILLIS),
             keep_alive_timeout_millis: Some(KEEP_ALIVE_TIMEOUT_MILLIS),
-            device: Some(pb::connection_request_frame::Device::ConnectionsDevice(device)),
+            device: Some(pb::connection_request_frame::Device::ConnectionsDevice(
+                device,
+            )),
             ..Default::default()
         });
     });
@@ -484,7 +510,14 @@ fn can_generate_bwu_wifi_aware_path_available() {
 #[test]
 fn can_generate_bwu_wifi_direct_path_available() {
     let bytes = for_bwu_wifi_direct_path_available(
-        "", "", 1000, 2412, false, "192.168.1.1", "NC-WifiDirectTest", "b592f7d3",
+        "",
+        "",
+        1000,
+        2412,
+        false,
+        "192.168.1.1",
+        "NC-WifiDirectTest",
+        "b592f7d3",
     );
     let message = from_bytes(&bytes).expect("frame should parse");
 

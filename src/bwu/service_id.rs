@@ -42,7 +42,10 @@ mod tests {
 
     #[test]
     fn wraps_only_when_needed() {
-        assert_eq!(wrap_initiator_upgrade_service_id("ServiceA"), "ServiceA_UPGRADE");
+        assert_eq!(
+            wrap_initiator_upgrade_service_id("ServiceA"),
+            "ServiceA_UPGRADE"
+        );
         // Idempotent and empty-safe.
         assert_eq!(
             wrap_initiator_upgrade_service_id("ServiceA_UPGRADE"),
@@ -56,7 +59,10 @@ mod tests {
         assert!(is_initiator_upgrade_service_id("ServiceA_UPGRADE"));
         assert!(!is_initiator_upgrade_service_id("ServiceA"));
         assert!(!is_initiator_upgrade_service_id(""));
-        assert_eq!(unwrap_initiator_upgrade_service_id("ServiceA_UPGRADE"), "ServiceA");
+        assert_eq!(
+            unwrap_initiator_upgrade_service_id("ServiceA_UPGRADE"),
+            "ServiceA"
+        );
         assert_eq!(unwrap_initiator_upgrade_service_id("ServiceA"), "ServiceA");
         assert_eq!(unwrap_initiator_upgrade_service_id(""), "");
     }

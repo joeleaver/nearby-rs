@@ -68,9 +68,7 @@ fn has_illegal_characters(to_validate: &str, illegal_patterns: &[&str]) -> bool 
     if to_validate.is_empty() {
         return false;
     }
-    illegal_patterns
-        .iter()
-        .any(|pat| to_validate.contains(pat))
+    illegal_patterns.iter().any(|pat| to_validate.contains(pat))
 }
 
 fn ensure_valid_connection_request_frame(frame: &pb::ConnectionRequestFrame) -> Exception {
@@ -95,8 +93,7 @@ fn ensure_valid_payload_transfer_data_frame(
     if payload_chunk.flags.is_none() {
         return Exception::InvalidProtocolBuffer;
     }
-    let last_chunk_flag =
-        pb::payload_transfer_frame::payload_chunk::Flags::LastChunk as i32;
+    let last_chunk_flag = pb::payload_transfer_frame::payload_chunk::Flags::LastChunk as i32;
     let is_last_chunk = (payload_chunk.flags.unwrap_or(0) & last_chunk_flag) != 0;
     if payload_chunk.body.is_none() && !is_last_chunk {
         return Exception::InvalidProtocolBuffer;
@@ -191,8 +188,11 @@ fn ensure_valid_bwu_wifi_hotspot_path_available(
     match &creds.password {
         None => return Exception::InvalidProtocolBuffer,
         Some(p) => {
-            if !within_range(p.len(), WIFI_PASSWORD_SSID_MIN_LENGTH, WIFI_PASSWORD_SSID_MAX_LENGTH)
-            {
+            if !within_range(
+                p.len(),
+                WIFI_PASSWORD_SSID_MIN_LENGTH,
+                WIFI_PASSWORD_SSID_MAX_LENGTH,
+            ) {
                 return Exception::InvalidProtocolBuffer;
             }
         }
@@ -250,7 +250,11 @@ fn ensure_valid_bwu_wifi_direct_path_available(
         None => false,
     };
     let password_valid = match &creds.password {
-        Some(p) => within_range(p.len(), WIFI_PASSWORD_SSID_MIN_LENGTH, WIFI_PASSWORD_SSID_MAX_LENGTH),
+        Some(p) => within_range(
+            p.len(),
+            WIFI_PASSWORD_SSID_MIN_LENGTH,
+            WIFI_PASSWORD_SSID_MAX_LENGTH,
+        ),
         None => false,
     };
     let device_name_valid = match &creds.device_name {
@@ -258,7 +262,11 @@ fn ensure_valid_bwu_wifi_direct_path_available(
         None => false,
     };
     let pin_valid = match &creds.pin {
-        Some(p) => within_range(p.len(), WIFI_DIRECT_PIN_MIN_LENGTH, WIFI_DIRECT_PIN_MAX_LENGTH),
+        Some(p) => within_range(
+            p.len(),
+            WIFI_DIRECT_PIN_MIN_LENGTH,
+            WIFI_DIRECT_PIN_MAX_LENGTH,
+        ),
         None => false,
     };
     if (ssid_valid && password_valid) || (device_name_valid && pin_valid) {
@@ -337,9 +345,7 @@ fn ensure_valid_bwu_client_introduction_frame(
     Exception::Success
 }
 
-fn ensure_valid_bwu_negotiation_frame(
-    frame: &pb::BandwidthUpgradeNegotiationFrame,
-) -> Exception {
+fn ensure_valid_bwu_negotiation_frame(frame: &pb::BandwidthUpgradeNegotiationFrame) -> Exception {
     use pb::bandwidth_upgrade_negotiation_frame::EventType;
     let event_type = match frame.event_type.and_then(|v| EventType::try_from(v).ok()) {
         Some(e) => e,

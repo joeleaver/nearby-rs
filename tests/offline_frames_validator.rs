@@ -41,7 +41,15 @@ fn connection_info() -> ConnectionInfo {
         bssid: "FF:FF:FF:FF:FF:FF".into(),
         ap_frequency: 2412,
         supported_mediums: vec![
-            Mdns, Bluetooth, WifiHotspot, Ble, WifiLan, WifiAware, Nfc, WifiDirect, WebRtc,
+            Mdns,
+            Bluetooth,
+            WifiHotspot,
+            Ble,
+            WifiLan,
+            WifiAware,
+            Nfc,
+            WifiDirect,
+            WebRtc,
         ],
         keep_alive_interval_millis: 1000,
         keep_alive_timeout_millis: 5000,
@@ -50,7 +58,10 @@ fn connection_info() -> ConnectionInfo {
     }
 }
 
-fn bytes_header(total_size: i64, payload_type: ptf::payload_header::PayloadType) -> ptf::PayloadHeader {
+fn bytes_header(
+    total_size: i64,
+    payload_type: ptf::payload_header::PayloadType,
+) -> ptf::PayloadHeader {
     ptf::PayloadHeader {
         id: Some(12345),
         r#type: Some(payload_type as i32),
@@ -72,13 +83,21 @@ fn data_chunk() -> ptf::PayloadChunk {
 
 #[test]
 fn validates_as_ok_with_valid_connection_request_frame() {
-    let frame = decode(&for_connection_request_connections(None, &connection_info(), false));
+    let frame = decode(&for_connection_request_connections(
+        None,
+        &connection_info(),
+        false,
+    ));
     assert!(ensure_valid_offline_frame(&frame).ok());
 }
 
 #[test]
 fn validates_as_fail_with_null_connection_request_frame() {
-    let mut frame = decode(&for_connection_request_connections(None, &connection_info(), false));
+    let mut frame = decode(&for_connection_request_connections(
+        None,
+        &connection_info(),
+        false,
+    ));
     frame.v1.as_mut().unwrap().connection_request = None;
     assert!(!ensure_valid_offline_frame(&frame).ok());
 }
@@ -97,8 +116,14 @@ fn validates_as_fail_with_empty_endpoint_id_in_connection_request_frame() {
     info.local_endpoint_id = String::new();
     let mut frame = decode(&for_connection_request_connections(None, &info, false));
     // Present-but-empty endpoint_id should still fail.
-    frame.v1.as_mut().unwrap().connection_request.as_mut().unwrap().endpoint_id =
-        Some(String::new());
+    frame
+        .v1
+        .as_mut()
+        .unwrap()
+        .connection_request
+        .as_mut()
+        .unwrap()
+        .endpoint_id = Some(String::new());
     let frame = decode(&frame.encode_to_vec());
     assert!(!ensure_valid_offline_frame(&frame).ok());
 }
@@ -185,15 +210,17 @@ fn validates_as_failed_type_file_with_illegal_file_path() {
     header.file_name = Some("earth_85MB_test (1): (3) (4) (8) (1) (2) (2) (1).jpg".to_string());
     header.parent_folder = Some(String::new());
     let frame = decode(&for_data_payload_transfer(header, data_chunk()));
-    assert_eq!(ensure_valid_offline_frame(&frame), Exception::IllegalCharacters);
+    assert_eq!(
+        ensure_valid_offline_frame(&frame),
+        Exception::IllegalCharacters
+    );
 }
 
 #[test]
 fn validates_as_ok_type_file_with_legal_parent_folder() {
     let mut header = bytes_header(30_000_000_000, ptf::payload_header::PayloadType::File);
     header.file_name = Some(String::new());
-    header.parent_folder =
-        Some("earth_85MB_test (1) (3) (4) (8) (1) (2) (2) (1).jpg".to_string());
+    header.parent_folder = Some("earth_85MB_test (1) (3) (4) (8) (1) (2) (2) (1).jpg".to_string());
     let frame = decode(&for_data_payload_transfer(header, data_chunk()));
     assert!(ensure_valid_offline_frame(&frame).ok());
 }
@@ -202,10 +229,12 @@ fn validates_as_ok_type_file_with_legal_parent_folder() {
 fn validates_as_failed_type_file_with_illegal_parent_folder() {
     let mut header = bytes_header(30_000_000_000, ptf::payload_header::PayloadType::File);
     header.file_name = Some(String::new());
-    header.parent_folder =
-        Some("earth_85MB_test (1): (3) (4) (8) (1) (2) (2) (1).jpg".to_string());
+    header.parent_folder = Some("earth_85MB_test (1): (3) (4) (8) (1) (2) (2) (1).jpg".to_string());
     let frame = decode(&for_data_payload_transfer(header, data_chunk()));
-    assert_eq!(ensure_valid_offline_frame(&frame), Exception::IllegalCharacters);
+    assert_eq!(
+        ensure_valid_offline_frame(&frame),
+        Exception::IllegalCharacters
+    );
 }
 
 #[test]
@@ -224,7 +253,14 @@ fn validates_as_fail_with_null_payload_header_in_payload_transfer_frame() {
         bytes_header(1024, ptf::payload_header::PayloadType::Bytes),
         data_chunk(),
     ));
-    frame.v1.as_mut().unwrap().payload_transfer.as_mut().unwrap().payload_header = None;
+    frame
+        .v1
+        .as_mut()
+        .unwrap()
+        .payload_transfer
+        .as_mut()
+        .unwrap()
+        .payload_header = None;
     assert!(!ensure_valid_offline_frame(&frame).ok());
 }
 
@@ -243,7 +279,14 @@ fn validates_as_fail_with_null_payload_chunk_in_payload_transfer_frame() {
         bytes_header(1024, ptf::payload_header::PayloadType::Bytes),
         data_chunk(),
     ));
-    frame.v1.as_mut().unwrap().payload_transfer.as_mut().unwrap().payload_chunk = None;
+    frame
+        .v1
+        .as_mut()
+        .unwrap()
+        .payload_transfer
+        .as_mut()
+        .unwrap()
+        .payload_chunk = None;
     assert!(!ensure_valid_offline_frame(&frame).ok());
 }
 
@@ -275,7 +318,17 @@ fn validates_as_fail_with_invalid_flags_in_payload_chunk() {
         bytes_header(1024, ptf::payload_header::PayloadType::Bytes),
         data_chunk(),
     ));
-    frame.v1.as_mut().unwrap().payload_transfer.as_mut().unwrap().payload_chunk.as_mut().unwrap().flags = None;
+    frame
+        .v1
+        .as_mut()
+        .unwrap()
+        .payload_transfer
+        .as_mut()
+        .unwrap()
+        .payload_chunk
+        .as_mut()
+        .unwrap()
+        .flags = None;
     assert!(!ensure_valid_offline_frame(&frame).ok());
 }
 
@@ -289,7 +342,14 @@ fn validates_as_fail_with_null_control_message_in_payload_transfer_frame() {
         bytes_header(1024, ptf::payload_header::PayloadType::Bytes),
         control,
     ));
-    frame.v1.as_mut().unwrap().payload_transfer.as_mut().unwrap().control_message = None;
+    frame
+        .v1
+        .as_mut()
+        .unwrap()
+        .payload_transfer
+        .as_mut()
+        .unwrap()
+        .control_message = None;
     assert!(!ensure_valid_offline_frame(&frame).ok());
 }
 
@@ -525,12 +585,10 @@ fn validates_as_fail_with_invalid_ssid_in_bandwidth_upgrade_wifi_direct() {
 
 #[test]
 fn validates_as_fail_with_invalid_password_in_bandwidth_upgrade_wifi_direct() {
-    let long_password = format!(
-        "{WIFI_DIRECT_SSID}AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789"
-    );
-    let long_pin = format!(
-        "{WIFI_DIRECT_PIN}AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789"
-    );
+    let long_password =
+        format!("{WIFI_DIRECT_SSID}AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789");
+    let long_pin =
+        format!("{WIFI_DIRECT_PIN}AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789");
     let frame = decode(&for_bwu_wifi_direct_path_available(
         WIFI_DIRECT_SSID,
         &long_password,
