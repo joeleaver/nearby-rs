@@ -264,6 +264,18 @@ impl BwuHandle {
         self.fire(BwuCommand::Shutdown).await;
     }
 
+    /// A [`ConnectionSink`](crate::bwu::wifi_lan::ConnectionSink) that posts an
+    /// upgraded socket to this actor as a [`BwuCommand::IncomingConnection`]. It
+    /// uses `blocking_send`, so call it only from a **blocking** (non-async)
+    /// context — e.g. a `TcpListener` accept loop thread, which is exactly where
+    /// the WIFI_LAN handler invokes it.
+    pub fn connection_sink(&self) -> Arc<dyn Fn(IncomingSocketConnection) + Send + Sync> {
+        let tx = self.tx.clone();
+        Arc::new(move |connection| {
+            let _ = tx.blocking_send(BwuCommand::IncomingConnection { connection });
+        })
+    }
+
     pub async fn is_upgrade_ongoing(&self, endpoint_id: impl Into<String>) -> bool {
         let endpoint_id = endpoint_id.into();
         self.query(|reply| BwuCommand::IsUpgradeOngoing { endpoint_id, reply })
@@ -285,8 +297,9 @@ impl BwuHandle {
     }
 }
 
-/// The owning side of the actor. Construct with [`BwuActor::new`], then move it
-/// onto a current-thread runtime and call [`BwuActor::run`].
+/// The owning side of the actor. Construct with [`BwuActor::new`] (or
+/// [`BwuActor::channel`] + [`BwuActor::build`] when a handler needs a sink to the
+/// actor), then `tokio::spawn` it or run it on a dedicated thread.
 pub struct BwuActor {
     manager: BwuManager,
     client: ClientProxy,
@@ -305,24 +318,41 @@ impl BwuActor {
         local_endpoint_id: impl Into<String>,
         command_buffer: usize,
     ) -> (BwuHandle, BwuActor) {
+        let (handle, rx) = Self::channel(command_buffer);
+        let actor = Self::build(rx, handlers, config, local_endpoint_id);
+        (handle, actor)
+    }
+
+    /// Creates just the command channel + handle, so handlers can be built with a
+    /// [`BwuHandle::connection_sink`] that posts to this actor *before* the actor
+    /// is constructed (e.g. a WIFI_LAN listener accept loop). Pair with
+    /// [`BwuActor::build`], passing the returned receiver.
+    pub fn channel(command_buffer: usize) -> (BwuHandle, mpsc::Receiver<BwuCommand>) {
+        let (tx, rx) = mpsc::channel(command_buffer.max(1));
+        (BwuHandle { tx }, rx)
+    }
+
+    /// Builds the actor around a receiver from [`BwuActor::channel`].
+    pub fn build(
+        rx: mpsc::Receiver<BwuCommand>,
+        handlers: HashMap<Medium, Box<dyn BwuHandler>>,
+        config: BwuConfig,
+        local_endpoint_id: impl Into<String>,
+    ) -> BwuActor {
         let ecm = Arc::new(Mutex::new(EndpointChannelManager::new()));
         let manager = BwuManager::new(ecm.clone(), handlers, config);
         let client = ClientProxy::new(0, &local_endpoint_id.into());
-        let (tx, rx) = mpsc::channel(command_buffer.max(1));
-        (
-            BwuHandle { tx },
-            BwuActor {
-                manager,
-                client,
-                ecm,
-                rx,
-                armed: HashMap::new(),
-            },
-        )
+        BwuActor {
+            manager,
+            client,
+            ecm,
+            rx,
+            armed: HashMap::new(),
+        }
     }
 
     /// Runs the actor until [`BwuCommand::Shutdown`] or until every [`BwuHandle`]
-    /// is dropped. Must be polled on a current-thread runtime / `LocalSet`.
+    /// is dropped. `Send`, so spawn it on any runtime or a dedicated thread.
     pub async fn run(mut self) {
         self.reconcile_timers();
         loop {
