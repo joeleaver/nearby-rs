@@ -215,7 +215,11 @@ pub fn for_connection_request_presence(
 ) -> Vec<u8> {
     let mut req = build_connection_request_common(connection_info);
     if !connection_info.local_endpoint_id.is_empty() {
-        req.endpoint_id = proto_presence_device.endpoint_id.clone();
+        // C++ calls set_endpoint_id(proto_presence_device.endpoint_id()); the
+        // proto2 accessor yields "" when unset and the setter marks the field
+        // present, so an unset device endpoint_id still emits a present-but-empty
+        // endpoint_id on the wire.
+        req.endpoint_id = Some(proto_presence_device.endpoint_id.clone().unwrap_or_default());
     }
     req.device = Some(pb::connection_request_frame::Device::PresenceDevice(
         proto_presence_device,
@@ -445,6 +449,35 @@ pub fn for_bwu_bluetooth_path_available(service_id: &str, mac_address: &str) -> 
         ..Default::default()
     };
     bwu_upgrade_path_available(info)
+}
+
+/// Builds a BWU `UPGRADE_PATH_AVAILABLE` for `WEB_RTC`.
+pub fn for_bwu_webrtc_path_available(peer_id: &str, location_hint: pb::LocationHint) -> Vec<u8> {
+    let creds = pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WebRtcCredentials {
+        peer_id: Some(peer_id.to_owned()),
+        location_hint: Some(location_hint),
+    };
+    let info = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
+        medium: Some(pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WebRtc as i32),
+        supports_client_introduction_ack: Some(true),
+        web_rtc_credentials: Some(creds),
+        ..Default::default()
+    };
+    bwu_upgrade_path_available(info)
+}
+
+/// Builds a BWU `UPGRADE_FAILURE` carrying the failed upgrade path.
+pub fn for_bwu_failure(
+    info: pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo,
+) -> Vec<u8> {
+    let sub = pb::BandwidthUpgradeNegotiationFrame {
+        event_type: Some(pb::bandwidth_upgrade_negotiation_frame::EventType::UpgradeFailure as i32),
+        upgrade_path_info: Some(info),
+        ..Default::default()
+    };
+    encode_v1(pb::v1_frame::FrameType::BandwidthUpgradeNegotiation, |v1| {
+        v1.bandwidth_upgrade_negotiation = Some(sub);
+    })
 }
 
 /// Builds a BWU `LAST_WRITE_TO_PRIOR_CHANNEL`.
@@ -743,6 +776,26 @@ mod tests {
                 m
             );
         }
+    }
+
+    #[test]
+    fn presence_request_emits_present_empty_endpoint_id_when_device_has_none() {
+        // C++ ForConnectionRequestPresence sets endpoint_id from the device's
+        // accessor (which yields "") whenever local_endpoint_id is non-empty, so
+        // the field must be present-but-empty even when the device omits it.
+        let info = ConnectionInfo {
+            local_endpoint_id: "ABC".into(),
+            local_endpoint_info: b"X".to_vec(),
+            ..Default::default()
+        };
+        let device = pb::PresenceDevice {
+            endpoint_id: None,
+            ..Default::default()
+        };
+        let frame = pb::OfflineFrame::decode(&for_connection_request_presence(device, &info)[..])
+            .unwrap();
+        let req = frame.v1.unwrap().connection_request.unwrap();
+        assert_eq!(req.endpoint_id, Some(String::new()));
     }
 
     #[test]

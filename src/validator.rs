@@ -52,10 +52,16 @@ fn matches_wifi_direct_ssid(s: &str) -> bool {
         return false;
     };
     let mut chars = rest.chars();
-    match (chars.next(), chars.next()) {
-        (Some(a), Some(b)) => a.is_ascii_alphanumeric() && b.is_ascii_alphanumeric(),
-        _ => false,
+    let (Some(a), Some(b)) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if !(a.is_ascii_alphanumeric() && b.is_ascii_alphanumeric()) {
+        return false;
     }
+    // The C++ `.` (ECMAScript grammar) does not match line terminators, and
+    // `regex_match` requires the whole string to match, so any line terminator
+    // in the remainder fails the pattern.
+    !chars.as_str().contains(['\n', '\r'])
 }
 
 fn has_illegal_characters(to_validate: &str, illegal_patterns: &[&str]) -> bool {
@@ -148,7 +154,15 @@ fn ensure_valid_payload_transfer_frame(frame: &pb::PayloadTransferFrame) -> Exce
             }
         }
     }
-    if frame.packet_type.is_none() {
+    // In proto2 an unrecognized enum value leaves the hasbit unset, so
+    // `has_packet_type()` is false for it. prost decodes the same bytes to
+    // `Some(<unknown i32>)`, so the presence test must reject any value that
+    // doesn't map to a known PacketType (not just `is_none()`).
+    if frame
+        .packet_type
+        .and_then(|v| pb::payload_transfer_frame::PacketType::try_from(v).ok())
+        .is_none()
+    {
         return Exception::InvalidProtocolBuffer;
     }
     match packet_type {
@@ -403,6 +417,37 @@ mod tests {
         assert!(!matches_wifi_direct_ssid("NOTDIRECT-AB"));
         assert!(!matches_wifi_direct_ssid("DIRECT-A"));
         assert!(!matches_wifi_direct_ssid("DIRECT-"));
+        // ECMAScript `.` does not match line terminators; `regex_match` is
+        // whole-string, so a trailing newline must fail (but a tab is fine).
+        assert!(!matches_wifi_direct_ssid("DIRECT-AB\n"));
+        assert!(!matches_wifi_direct_ssid("DIRECT-AB\r"));
+        assert!(matches_wifi_direct_ssid("DIRECT-AB\t"));
+    }
+
+    #[test]
+    fn unrecognized_packet_type_is_rejected() {
+        // proto2 `has_packet_type()` is false for an unknown enum value, so the
+        // C++ validator rejects it; prost decodes it as `Some(99)`.
+        let frame = pb::OfflineFrame {
+            version: Some(pb::offline_frame::Version::V1 as i32),
+            v1: Some(pb::V1Frame {
+                r#type: Some(pb::v1_frame::FrameType::PayloadTransfer as i32),
+                payload_transfer: Some(pb::PayloadTransferFrame {
+                    packet_type: Some(99),
+                    payload_header: Some(pb::payload_transfer_frame::PayloadHeader {
+                        id: Some(1),
+                        total_size: Some(1024),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            ensure_valid_offline_frame(&frame),
+            Exception::InvalidProtocolBuffer
+        );
     }
 
     #[test]
