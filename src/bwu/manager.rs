@@ -26,6 +26,9 @@ use crate::bwu::channel::{DisconnectionReason, EndpointChannel};
 use crate::bwu::channel_manager::EndpointChannelManager;
 use crate::bwu::client::ClientProxy;
 use crate::bwu::handler::{BwuHandler, IncomingSocketConnection};
+use crate::bwu::service_id::{
+    is_initiator_upgrade_service_id, wrap_initiator_upgrade_service_id, UNKNOWN_SERVICE_ID,
+};
 use crate::frames::{
     for_bwu_failure, for_bwu_introduction, for_bwu_introduction_ack, for_bwu_last_write,
     for_bwu_safe_to_close, for_disconnection, from_bytes, get_frame_type,
@@ -497,29 +500,127 @@ impl BwuManager {
 
     // -- failure (minimal; full machinery TODO) -----------------------------
 
+    /// Responder couldn't join the medium the initiator set up: tell the remote
+    /// (so it can pick another) and clean up our medium.
     fn run_upgrade_failed_protocol(
         &mut self,
         _client: &mut ClientProxy,
         endpoint_id: &str,
         upgrade_path_info: &UpgradePathInfo,
     ) {
-        // Tell the remote the upgrade failed so it can re-initiate / try another
-        // medium.
-        if let Some(channel) = self.ecm.borrow().get_channel_for_endpoint(endpoint_id) {
-            let _ = channel.write(&for_bwu_failure(upgrade_path_info.clone()));
+        let channel = match self.ecm.borrow().get_channel_for_endpoint(endpoint_id) {
+            Some(c) => c,
+            None => return,
+        };
+        if !channel.write(&for_bwu_failure(upgrade_path_info.clone())).ok() {
+            channel.close_with_reason(DisconnectionReason::IoError);
+            return;
         }
-        // TODO(port): full RevertBwuMediumForEndpoint + retry.
+        if self.get_bwu_medium_for_endpoint(endpoint_id) != Medium::UnknownMedium {
+            self.revert_bwu_medium_for_endpoint(&channel.service_id(), endpoint_id);
+        }
         self.in_progress_upgrades.remove(endpoint_id);
     }
 
+    /// The remote failed to upgrade to the medium we set up. Revert and (would)
+    /// try the next medium.
     fn process_upgrade_failure_event(
         &mut self,
         _client: &mut ClientProxy,
         endpoint_id: &str,
         _upgrade_path_info: &UpgradePathInfo,
     ) {
-        // TODO(port): TryNextBestUpgradeMediums + retry alarm + handler revert.
         self.in_progress_upgrades.remove(endpoint_id);
+
+        // With the single global medium (flag disabled), we can only switch
+        // mediums if there's at most one connected endpoint.
+        if !self.config.support_multiple_bwu_mediums
+            && self.ecm.borrow().get_connected_endpoints_count() > 1
+        {
+            return;
+        }
+
+        let service_id = self
+            .ecm
+            .borrow()
+            .get_channel_for_endpoint(endpoint_id)
+            .map(|c| c.service_id())
+            .unwrap_or_else(|| UNKNOWN_SERVICE_ID.to_string());
+        if self.get_bwu_medium_for_endpoint(endpoint_id) != Medium::UnknownMedium {
+            // Initiator side: wrap so the revert reaches the platform layer.
+            let upgrade_service_id = wrap_initiator_upgrade_service_id(&service_id);
+            self.revert_bwu_medium_for_endpoint(&upgrade_service_id, endpoint_id);
+        }
+        // TryNextBestUpgradeMediums omitted: the port omits ChooseBestUpgradeMedium
+        // / client.GetUpgradeMediums, so there are no untried mediums to retry.
+    }
+
+    // -- endpoint disconnect / revert ---------------------------------------
+
+    /// Cleans up an upgrade after the endpoint disconnects (mirrors the C++
+    /// `OnEndpointDisconnect` serial-thread lambda). The `CountDownLatch` barrier
+    /// is unnecessary in the synchronous port.
+    pub fn on_endpoint_disconnect(
+        &mut self,
+        client: &mut ClientProxy,
+        service_id: &str,
+        endpoint_id: &str,
+        _reason: DisconnectionReason,
+    ) {
+        let medium = self.get_bwu_medium_for_endpoint(endpoint_id);
+        if self.has_handler_for_medium(medium) {
+            self.handlers
+                .get_mut(&medium)
+                .unwrap()
+                .on_endpoint_disconnect(client, endpoint_id);
+        }
+        if let Some(old_channel) = self.previous_endpoint_channels.remove(endpoint_id) {
+            old_channel.close_with_reason(DisconnectionReason::Shutdown);
+        }
+        self.in_progress_upgrades.remove(endpoint_id);
+        self.successfully_upgraded_endpoints.remove(endpoint_id);
+        // retry_delays / retry alarms omitted.
+
+        if self.config.support_multiple_bwu_mediums
+            || self.ecm.borrow().get_connected_endpoints_count() <= 1
+        {
+            self.revert_bwu_medium_for_endpoint(service_id, endpoint_id);
+        }
+    }
+
+    fn revert_bwu_medium_for_endpoint(&mut self, service_id: &str, endpoint_id: &str) {
+        let medium = self.get_bwu_medium_for_endpoint(endpoint_id);
+
+        if !self.config.support_multiple_bwu_mediums {
+            // Coarse: reset the single global medium and revert ALL services.
+            self.medium = Medium::UnknownMedium;
+            if self.has_handler_for_medium(medium) {
+                self.handlers.get_mut(&medium).unwrap().revert_initiator_state();
+            }
+            return;
+        }
+
+        // Fine-grained, per-endpoint.
+        self.endpoint_id_to_bwu_medium.remove(endpoint_id);
+        if !self.has_handler_for_medium(medium) {
+            return;
+        }
+        if !is_initiator_upgrade_service_id(service_id) {
+            // Responder: only Hotspot/WifiDirect need to disconnect from the AP
+            // to restore the prior connection.
+            if medium == Medium::WifiHotspot || medium == Medium::WifiDirect {
+                self.handlers
+                    .get_mut(&medium)
+                    .unwrap()
+                    .revert_responder_state(service_id);
+            }
+            return;
+        }
+        // Initiator.
+        self.handlers
+            .get_mut(&medium)
+            .unwrap()
+            .revert_initiator_state_for_endpoint(service_id, endpoint_id);
     }
 
     pub fn shutdown(&mut self) {

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use nearby_rs::bwu::channel::DisconnectionReason;
+use nearby_rs::bwu::channel::{DisconnectionReason, SafeDisconnectionResult};
 use nearby_rs::bwu::testing::{
     notify_bwu_manager_of_incoming_connection, FakeBwuHandler, FakeBwuHandlerHandle,
     FakeEndpointChannel,
@@ -20,14 +20,22 @@ use nearby_rs::bwu::{
     BaseBwuHandler, BwuConfig, BwuHandler, BwuManager, ClientProxy, EndpointChannelManager,
 };
 use nearby_rs::frames::{
-    for_bwu_last_write, for_bwu_safe_to_close, for_bwu_wifi_lan_path_available, from_bytes,
-    Exception, ServiceAddress,
+    for_bwu_failure, for_bwu_last_write, for_bwu_safe_to_close,
+    for_bwu_wifi_direct_path_available, for_bwu_wifi_hotspot_path_available,
+    for_bwu_wifi_lan_path_available, from_bytes, Exception, ServiceAddress,
 };
 use nearby_rs::mediums::Medium;
+use nearby_rs::proto as pb;
 
 const SERVICE_A: &str = "ServiceA";
+const SERVICE_A_UPGRADE: &str = "ServiceA_UPGRADE";
+const SERVICE_B: &str = "ServiceB";
+const SERVICE_B_UPGRADE: &str = "ServiceB_UPGRADE";
 const ENDPOINT_1: &str = "Endpoint1";
 const ENDPOINT_2: &str = "Endpoint2";
+const ENDPOINT_3: &str = "Endpoint3";
+const ENDPOINT_4: &str = "Endpoint4";
+const ENDPOINT_5: &str = "Endpoint5";
 
 struct Fixture {
     client: ClientProxy,
@@ -147,6 +155,69 @@ impl Fixture {
         self.feed(for_bwu_last_write(), endpoint_id, initial_medium);
         self.feed(for_bwu_safe_to_close(), endpoint_id, initial_medium);
         upgraded
+    }
+
+    fn unregister(&mut self, endpoint_id: &str) {
+        self.ecm.borrow_mut().unregister_channel_for_endpoint(
+            endpoint_id,
+            DisconnectionReason::LocalDisconnection,
+            SafeDisconnectionResult::SafeDisconnection,
+        );
+    }
+
+    fn on_endpoint_disconnect(&mut self, service_id: &str, endpoint_id: &str) {
+        self.bwu.on_endpoint_disconnect(
+            &mut self.client,
+            service_id,
+            endpoint_id,
+            DisconnectionReason::LocalDisconnection,
+        );
+    }
+}
+
+/// Builds a responder-side `UPGRADE_PATH_AVAILABLE` frame (the local device is
+/// the responder), with `supports_client_introduction_ack = false` so the
+/// responder path completes without an ack read.
+fn responder_path_available_frame(medium: Medium) -> pb::OfflineFrame {
+    let bytes = match medium {
+        Medium::WifiDirect => for_bwu_wifi_direct_path_available(
+            "", "", 2143, 2412, false, "123.234.23.1", "NC-WifiDirectTest", "b592f7d3",
+        ),
+        Medium::WifiHotspot => {
+            let creds = pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WifiHotspotCredentials {
+                ssid: Some("Direct-357a2d8c".to_string()),
+                password: Some("b592f7d3".to_string()),
+                port: Some(1234),
+                frequency: Some(2412),
+                gateway: Some("123.234.23.1".to_string()),
+                ..Default::default()
+            };
+            for_bwu_wifi_hotspot_path_available(creds, false)
+        }
+        Medium::WifiLan => for_bwu_wifi_lan_path_available(&[ServiceAddress {
+            address: vec![b'A', b'B', b'C', b'D'],
+            port: 1234,
+        }]),
+        _ => panic!("unsupported responder medium {medium:?}"),
+    };
+    let mut frame = from_bytes(&bytes).expect("frame should parse");
+    if let Some(info) = frame
+        .v1
+        .as_mut()
+        .and_then(|v1| v1.bandwidth_upgrade_negotiation.as_mut())
+        .and_then(|b| b.upgrade_path_info.as_mut())
+    {
+        info.supports_client_introduction_ack = Some(false);
+    }
+    frame
+}
+
+fn web_rtc_upgrade_path_info() -> pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
+    pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo {
+        medium: Some(
+            pb::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium::WebRtc as i32,
+        ),
+        ..Default::default()
     }
 }
 
@@ -384,4 +455,264 @@ fn failed_to_write_upgrade_path_available_frame() {
         &mut f.client,
     );
     assert_eq!(f.current_medium(ENDPOINT_1), Medium::Bluetooth);
+}
+
+// --- revert / disconnect cluster ([11]-[20]) -------------------------------
+
+#[test]
+fn revert_on_disconnect_multiple_endpoints_flag_enabled() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_2, Medium::Bluetooth);
+    f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WebRtc);
+    f.fully_upgrade_endpoint(ENDPOINT_2, Medium::Bluetooth, Medium::WebRtc);
+
+    f.unregister(ENDPOINT_1);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_1);
+    {
+        let r = f.web_rtc.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.disconnect_calls[0].endpoint_id.as_deref(), Some(ENDPOINT_1));
+        // Not the last endpoint for the medium+service → no handler revert.
+        assert!(r.handle_revert_calls.is_empty());
+    }
+
+    f.unregister(ENDPOINT_2);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_2);
+    {
+        let r = f.web_rtc.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 2);
+        assert_eq!(r.disconnect_calls[1].endpoint_id.as_deref(), Some(ENDPOINT_2));
+        assert_eq!(r.handle_revert_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+    }
+}
+
+#[test]
+fn revert_on_disconnect_multiple_endpoints_flag_disabled() {
+    let mut f = fixture(false);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_2, Medium::Bluetooth);
+    f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WebRtc);
+    f.fully_upgrade_endpoint(ENDPOINT_2, Medium::Bluetooth, Medium::WebRtc);
+
+    // Off-by-one: revert fires at <=1 connected endpoint, while ep2 still remains.
+    f.unregister(ENDPOINT_1);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_1);
+    {
+        let r = f.web_rtc.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+    }
+
+    // Medium already reverted (global medium is now UNKNOWN) → second is a no-op.
+    f.unregister(ENDPOINT_2);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_2);
+    {
+        let r = f.web_rtc.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 1);
+    }
+}
+
+#[test]
+fn revert_on_disconnect_multiple_services_flag_enabled() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_B, ENDPOINT_2, Medium::Bluetooth);
+    f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WifiLan);
+    f.fully_upgrade_endpoint(ENDPOINT_2, Medium::Bluetooth, Medium::WifiLan);
+    assert_eq!(f.ecm.borrow().get_connected_endpoints_count(), 2);
+
+    f.unregister(ENDPOINT_1);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_1);
+    {
+        let r = f.wifi_lan.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+    }
+
+    f.unregister(ENDPOINT_2);
+    f.on_endpoint_disconnect(SERVICE_B_UPGRADE, ENDPOINT_2);
+    {
+        let r = f.wifi_lan.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 2);
+        assert_eq!(r.handle_revert_calls.len(), 2);
+        assert_eq!(r.handle_revert_calls[1].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+    }
+}
+
+#[test]
+fn revert_on_disconnect_multiple_services_flag_disabled() {
+    let mut f = fixture(false);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_B, ENDPOINT_2, Medium::Bluetooth);
+    f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WifiLan);
+    f.fully_upgrade_endpoint(ENDPOINT_2, Medium::Bluetooth, Medium::WifiLan);
+
+    // Flag-disabled reverts ALL tracked services at once (2 reverts) at <=1.
+    f.unregister(ENDPOINT_1);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_1);
+    {
+        let r = f.wifi_lan.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 2);
+    }
+
+    f.unregister(ENDPOINT_2);
+    f.on_endpoint_disconnect(SERVICE_B_UPGRADE, ENDPOINT_2);
+    {
+        let r = f.wifi_lan.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 2);
+    }
+}
+
+#[test]
+fn revert_on_disconnect_multiple_services_and_endpoints_flag_enabled() {
+    let mut f = fixture(true);
+    // Service A: ep1, ep2.  Service B: ep3, ep4, ep5.
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_2, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_B, ENDPOINT_3, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_B, ENDPOINT_4, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_B, ENDPOINT_5, Medium::Bluetooth);
+    f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WebRtc);
+    f.fully_upgrade_endpoint(ENDPOINT_4, Medium::Bluetooth, Medium::WifiHotspot);
+    f.fully_upgrade_endpoint(ENDPOINT_5, Medium::Bluetooth, Medium::WifiDirect);
+    f.fully_upgrade_endpoint(ENDPOINT_2, Medium::Bluetooth, Medium::WifiLan);
+    f.fully_upgrade_endpoint(ENDPOINT_3, Medium::Bluetooth, Medium::WifiLan);
+
+    // ep1 / service A / WEB_RTC (last WEB_RTC for A).
+    f.unregister(ENDPOINT_1);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_1);
+    {
+        let r = f.web_rtc.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+    }
+
+    // ep2 / service A / WIFI_LAN (last LAN for A).
+    f.unregister(ENDPOINT_2);
+    f.on_endpoint_disconnect(SERVICE_A_UPGRADE, ENDPOINT_2);
+    {
+        let r = f.wifi_lan.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_A_UPGRADE));
+    }
+
+    // ep3 / service B / WIFI_LAN (last LAN for B).
+    f.unregister(ENDPOINT_3);
+    f.on_endpoint_disconnect(SERVICE_B_UPGRADE, ENDPOINT_3);
+    {
+        let r = f.wifi_lan.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 2);
+        assert_eq!(r.handle_revert_calls.len(), 2);
+        assert_eq!(r.handle_revert_calls[1].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+    }
+
+    // ep4 / service B / WIFI_HOTSPOT.
+    f.unregister(ENDPOINT_4);
+    f.on_endpoint_disconnect(SERVICE_B_UPGRADE, ENDPOINT_4);
+    {
+        let r = f.wifi_hotspot.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+    }
+
+    // ep5 / service B / WIFI_DIRECT.
+    f.unregister(ENDPOINT_5);
+    f.on_endpoint_disconnect(SERVICE_B_UPGRADE, ENDPOINT_5);
+    {
+        let r = f.wifi_direct.lock().unwrap();
+        assert_eq!(r.disconnect_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls.len(), 1);
+        assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+    }
+
+    // WEB_RTC untouched after the first disconnect.
+    assert_eq!(f.web_rtc.lock().unwrap().disconnect_calls.len(), 1);
+    assert_eq!(f.web_rtc.lock().unwrap().handle_revert_calls.len(), 1);
+}
+
+fn setup_upgrade_failure(support_multiple: bool) -> Fixture {
+    let mut f = fixture(support_multiple);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_2, Medium::Bluetooth);
+    f.fully_upgrade_endpoint(ENDPOINT_1, Medium::Bluetooth, Medium::WebRtc);
+    f.fully_upgrade_endpoint(ENDPOINT_2, Medium::Bluetooth, Medium::WebRtc);
+    f.create_initial_endpoint(SERVICE_B, ENDPOINT_3, Medium::Bluetooth);
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_3, Medium::WebRtc);
+    // index 2 = ep3's initialize call on the web_rtc handler.
+    notify_bwu_manager_of_incoming_connection(&f.web_rtc, Medium::WebRtc, 2, &mut f.bwu, &mut f.client);
+    f
+}
+
+#[test]
+fn revert_on_upgrade_failure_flag_enabled() {
+    let mut f = setup_upgrade_failure(true);
+    let failure = for_bwu_failure(web_rtc_upgrade_path_info());
+    f.feed(failure, ENDPOINT_3, Medium::WebRtc);
+    let r = f.web_rtc.lock().unwrap();
+    assert_eq!(r.handle_revert_calls.len(), 1);
+    assert_eq!(r.handle_revert_calls[0].service_id.as_deref(), Some(SERVICE_B_UPGRADE));
+}
+
+#[test]
+fn revert_on_upgrade_failure_flag_disabled() {
+    let mut f = setup_upgrade_failure(false);
+    let failure = for_bwu_failure(web_rtc_upgrade_path_info());
+    f.feed(failure, ENDPOINT_3, Medium::WebRtc);
+    // Flag disabled + other connected endpoints → no revert.
+    assert!(f.web_rtc.lock().unwrap().handle_revert_calls.is_empty());
+}
+
+#[test]
+fn revert_on_disconnect_wifi_direct_responder() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    // Receiving UPGRADE_PATH_AVAILABLE makes the local device the responder.
+    let frame = responder_path_available_frame(Medium::WifiDirect);
+    f.bwu
+        .on_incoming_frame(&frame, ENDPOINT_1, &mut f.client, Medium::Bluetooth);
+
+    // Responder disconnect uses the RAW service id.
+    f.on_endpoint_disconnect(SERVICE_A, ENDPOINT_1);
+    let r = f.wifi_direct.lock().unwrap();
+    assert_eq!(r.disconnect_calls.len(), 1);
+    assert_eq!(r.disconnect_calls[0].endpoint_id.as_deref(), Some(ENDPOINT_1));
+    // Responder reverts for WIFI_DIRECT.
+    assert_eq!(r.handle_revert_calls.len(), 1);
+}
+
+#[test]
+fn revert_on_disconnect_hotspot_responder() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    let frame = responder_path_available_frame(Medium::WifiHotspot);
+    f.bwu
+        .on_incoming_frame(&frame, ENDPOINT_1, &mut f.client, Medium::Bluetooth);
+
+    f.on_endpoint_disconnect(SERVICE_A, ENDPOINT_1);
+    // Responder reverts for WIFI_HOTSPOT.
+    assert_eq!(f.wifi_hotspot.lock().unwrap().handle_revert_calls.len(), 1);
+}
+
+#[test]
+fn revert_on_disconnect_wifi_lan_responder() {
+    let mut f = fixture(true);
+    f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+    let frame = responder_path_available_frame(Medium::WifiLan);
+    f.bwu
+        .on_incoming_frame(&frame, ENDPOINT_1, &mut f.client, Medium::Bluetooth);
+
+    f.on_endpoint_disconnect(SERVICE_A, ENDPOINT_1);
+    // Responder does NOT revert for WIFI_LAN (only Hotspot/WifiDirect).
+    assert!(f.wifi_lan.lock().unwrap().handle_revert_calls.is_empty());
 }
