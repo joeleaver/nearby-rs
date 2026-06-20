@@ -86,6 +86,7 @@ fn fixture(support_multiple_bwu_mediums: bool) -> Fixture {
         handlers,
         BwuConfig {
             support_multiple_bwu_mediums,
+            ..Default::default()
         },
     );
     bwu.make_single_threaded_for_testing();

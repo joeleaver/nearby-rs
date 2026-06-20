@@ -24,6 +24,11 @@ struct EndpointState {
     /// responder role); gates out an inbound `UPGRADE_PATH_AVAILABLE`.
     is_incoming: bool,
     auto_upgrade_bandwidth: bool,
+    /// The mutually-supported upgrade mediums for this endpoint, ordered by
+    /// decreasing preference (mirrors `ConnectionOptions::GetUpgradeMediums()
+    /// .GetMediums(true)`). The retry machinery walks this to pick the next
+    /// medium after an `UPGRADE_FAILURE`. Empty until configured.
+    upgrade_mediums: Vec<Medium>,
 }
 
 /// Per-client connection bookkeeping queried by `BwuManager`.
@@ -98,6 +103,12 @@ impl ClientProxy {
         self.entry(endpoint_id).connected = true;
     }
 
+    /// `OnDisconnected`: the endpoint is gone. Drops its state so
+    /// `is_connected_to_endpoint` and `get_upgrade_mediums` reflect the loss.
+    pub fn on_disconnected(&mut self, endpoint_id: &str) {
+        self.endpoints.remove(endpoint_id);
+    }
+
     /// True once both local and remote have accepted.
     pub fn is_connection_accepted(&self, endpoint_id: &str) -> bool {
         self.endpoints
@@ -127,6 +138,23 @@ impl ClientProxy {
             .get(endpoint_id)
             .map(|e| e.auto_upgrade_bandwidth)
             .unwrap_or(false)
+    }
+
+    /// Sets the endpoint's mutually-supported upgrade mediums, ordered by
+    /// decreasing preference (the caller is responsible for the ordering, which
+    /// mirrors `BooleanMediumSelector::GetMediums(true)`:
+    /// AWDL → WIFI_LAN → WIFI_DIRECT → WIFI_HOTSPOT → WEB_RTC → BLUETOOTH → BLE).
+    pub fn set_upgrade_mediums(&mut self, endpoint_id: &str, mediums: Vec<Medium>) {
+        self.entry(endpoint_id).upgrade_mediums = mediums;
+    }
+
+    /// `ClientProxy::GetUpgradeMediums(endpoint_id).GetMediums(true)` — the
+    /// ordered list of mediums the BWU retry path tries.
+    pub fn get_upgrade_mediums(&self, endpoint_id: &str) -> Vec<Medium> {
+        self.endpoints
+            .get(endpoint_id)
+            .map(|e| e.upgrade_mediums.clone())
+            .unwrap_or_default()
     }
 
     /// `OnBandwidthChanged` — the success callback fired after an upgrade.

@@ -15,16 +15,22 @@
 //! Status: the full synchronous state machine the 23-case `bwu_manager_test`
 //! oracle exercises is in place — initiate, dispatch, the responder path, the
 //! converged upgrade protocol, out-of-order handling, and
-//! `OnEndpointDisconnect`/revert (both feature-flag branches). The only deferred
-//! piece is the retry machinery (`TryNextBestUpgradeMediums` /
-//! `RetryUpgradesAfterDelay` / retry alarms): it is untested by the oracle and
-//! is entangled with the omitted `ChooseBestUpgradeMedium`/`Mediums` and the
-//! async timer layer, so it belongs with the Tokio-actor integration (Phase 3).
+//! `OnEndpointDisconnect`/revert (both feature-flag branches). The retry
+//! machinery (`TryNextBestUpgradeMediums` / `ChooseBestUpgradeMedium` /
+//! `RetryUpgradesAfterDelay` / `CalculateNextRetryDelay` / the retry-alarm maps)
+//! is also ported; since the upstream oracle has NO retry tests, it is covered
+//! by hand-authored tests in `tests/bwu_retry.rs`. The async timer is modelled
+//! as a seam: the scheduled delay is recorded ([`BwuManager::pending_retry_delay`])
+//! and the integration layer (the Phase-3 Tokio actor) arms a real timer and
+//! calls [`BwuManager::fire_retry_alarm`] when it elapses. The `ChooseBest`
+//! medium-availability check maps to "a handler is registered" since the
+//! platform radio layer (`Mediums`) is omitted.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::bwu::channel::{DisconnectionReason, EndpointChannel};
 use crate::bwu::channel_manager::EndpointChannelManager;
@@ -45,16 +51,33 @@ use pb::bandwidth_upgrade_negotiation_frame::EventType;
 type UpgradePathInfo = pb::bandwidth_upgrade_negotiation_frame::UpgradePathInfo;
 
 /// `BwuManager::Config` (the subset the port uses).
+///
+/// `support_multiple_bwu_mediums` and `use_exp_backoff_in_bwu_retry` are
+/// `FeatureFlags` process-globals in C++; per the port's established pattern
+/// (a global races across parallel Rust tests) they are explicit config here.
+/// Their defaults match `internal/platform/feature_flags.h` (both `true`).
 #[derive(Clone, Debug)]
 pub struct BwuConfig {
     /// Selects the per-(medium,service) vs total-count revert bookkeeping.
     pub support_multiple_bwu_mediums: bool,
+    /// When set, the BWU retry interval doubles each attempt (capped at
+    /// `bandwidth_upgrade_retry_max_delay`); otherwise it grows linearly by
+    /// `bandwidth_upgrade_retry_delay` each attempt.
+    pub use_exp_backoff_in_bwu_retry: bool,
+    /// Initial retry delay. `ZERO` means "resolve from the backoff flag" in the
+    /// constructor (3s with exp backoff, 5s without), mirroring the C++ ctor.
+    pub bandwidth_upgrade_retry_delay: Duration,
+    /// Maximum retry delay. `ZERO` resolves to 300s (exp) / 10s (linear).
+    pub bandwidth_upgrade_retry_max_delay: Duration,
 }
 
 impl Default for BwuConfig {
     fn default() -> Self {
         Self {
             support_multiple_bwu_mediums: true,
+            use_exp_backoff_in_bwu_retry: true,
+            bandwidth_upgrade_retry_delay: Duration::ZERO,
+            bandwidth_upgrade_retry_max_delay: Duration::ZERO,
         }
     }
 }
@@ -77,14 +100,43 @@ pub struct BwuManager {
     /// Endpoints whose remote LAST_WRITE arrived before we parked the old
     /// channel (the early-LAST_WRITE race latch).
     successfully_upgraded_endpoints: HashSet<String>,
+
+    /// Endpoints with a scheduled-but-not-yet-fired retry, keyed to the delay
+    /// the (async) timer was armed with. Mirrors the C++ `retry_upgrade_alarms_`
+    /// `(CancelableAlarm, delay)` map: here the alarm object is the integration
+    /// seam (the Tokio actor arms a real timer from `pending_retry_delay` and
+    /// calls `fire_retry_alarm` when it elapses), so we keep only the delay.
+    /// Cleared on cancel; an entry's *absence* means "cancelled / already fired".
+    retry_upgrade_alarms: HashMap<String, Duration>,
+    /// The last retry delay used per endpoint, kept so the backoff can be
+    /// resumed across a cancel (C++ `retry_delays_`). Unlike `retry_upgrade_alarms`
+    /// this survives `cancel_retry_upgrade_alarm`; only `OnEndpointDisconnect`
+    /// and `CancelAllRetryUpgradeAlarms` erase it.
+    retry_delays: HashMap<String, Duration>,
 }
 
 impl BwuManager {
     pub fn new(
         ecm: Rc<RefCell<EndpointChannelManager>>,
         handlers: HashMap<Medium, Box<dyn BwuHandler>>,
-        config: BwuConfig,
+        mut config: BwuConfig,
     ) -> Self {
+        // Resolve zero-valued retry delays from the backoff flag (C++ ctor,
+        // bwu_manager.cc:79-94, using the feature_flags.h defaults).
+        if config.bandwidth_upgrade_retry_delay.is_zero() {
+            config.bandwidth_upgrade_retry_delay = if config.use_exp_backoff_in_bwu_retry {
+                Duration::from_secs(3)
+            } else {
+                Duration::from_secs(5)
+            };
+        }
+        if config.bandwidth_upgrade_retry_max_delay.is_zero() {
+            config.bandwidth_upgrade_retry_max_delay = if config.use_exp_backoff_in_bwu_retry {
+                Duration::from_secs(300)
+            } else {
+                Duration::from_secs(10)
+            };
+        }
         Self {
             config,
             ecm,
@@ -94,6 +146,8 @@ impl BwuManager {
             in_progress_upgrades: HashSet::new(),
             previous_endpoint_channels: HashMap::new(),
             successfully_upgraded_endpoints: HashSet::new(),
+            retry_upgrade_alarms: HashMap::new(),
+            retry_delays: HashMap::new(),
         }
     }
 
@@ -157,7 +211,8 @@ impl BwuManager {
         if self.in_progress_upgrades.contains(endpoint_id) {
             return;
         }
-        // CancelRetryUpgradeAlarm(endpoint_id) — TODO(port): retry machinery.
+        // A fresh initiate supersedes any pending retry (bwu_manager.cc:257).
+        self.cancel_retry_upgrade_alarm(endpoint_id);
 
         let channel = self.ecm.borrow().get_channel_for_endpoint(endpoint_id);
         let channel_medium = channel
@@ -408,6 +463,8 @@ impl BwuManager {
         if !self.in_progress_upgrades.contains(&endpoint_id) {
             return;
         }
+        // The upgrade connected, so any pending retry for it is moot (bwu_manager.cc:686).
+        self.cancel_retry_upgrade_alarm(&endpoint_id);
         let enable_encryption = !introduction.supports_disabling_encryption.unwrap_or(false);
         self.run_upgrade_protocol(client, &endpoint_id, channel, enable_encryption);
     }
@@ -526,13 +583,14 @@ impl BwuManager {
         self.in_progress_upgrades.remove(endpoint_id);
     }
 
-    /// The remote failed to upgrade to the medium we set up. Revert and (would)
-    /// try the next medium.
+    /// The remote failed to upgrade to the medium we set up. Revert our current
+    /// upgrade medium and try the next-best untried medium (retrying after a
+    /// delay if none remain). Mirrors `ProcessUpgradeFailureEvent`.
     fn process_upgrade_failure_event(
         &mut self,
-        _client: &mut ClientProxy,
+        client: &mut ClientProxy,
         endpoint_id: &str,
-        _upgrade_path_info: &UpgradePathInfo,
+        upgrade_path_info: &UpgradePathInfo,
     ) {
         self.in_progress_upgrades.remove(endpoint_id);
 
@@ -555,8 +613,161 @@ impl BwuManager {
             let upgrade_service_id = wrap_initiator_upgrade_service_id(&service_id);
             self.revert_bwu_medium_for_endpoint(&upgrade_service_id, endpoint_id);
         }
-        // TryNextBestUpgradeMediums omitted: the port omits ChooseBestUpgradeMedium
-        // / client.GetUpgradeMediums, so there are no untried mediums to retry.
+
+        // Drop everything up to and including the medium we last attempted,
+        // leaving only the untried tail of the preference-ordered list, then
+        // try the next-best of those (bwu_manager.cc:1451-1465).
+        let last = upi_medium(upgrade_path_info);
+        let all_possible = client.get_upgrade_mediums(endpoint_id);
+        let mut untried = all_possible.clone();
+        for medium in &all_possible {
+            untried.remove(0);
+            if *medium == last {
+                break;
+            }
+        }
+        self.try_next_best_upgrade_mediums(client, endpoint_id, untried);
+    }
+
+    // -- retry machinery ----------------------------------------------------
+
+    /// Picks the best medium from `upgrade_mediums` and either re-initiates the
+    /// upgrade on it or, if none is viable, schedules a delayed retry. Mirrors
+    /// `TryNextBestUpgradeMediums`.
+    fn try_next_best_upgrade_mediums(
+        &mut self,
+        client: &mut ClientProxy,
+        endpoint_id: &str,
+        upgrade_mediums: Vec<Medium>,
+    ) {
+        let next_medium = self.choose_best_upgrade_medium(endpoint_id, &upgrade_mediums);
+
+        let current_medium = self
+            .ecm
+            .borrow()
+            .get_channel_for_endpoint(endpoint_id)
+            .map(|c| c.medium())
+            .unwrap_or(Medium::UnknownMedium);
+
+        // If we're not already on WIFI_LAN and there's no new medium to try
+        // (the best pick is the current one, or unknown, or the list is empty),
+        // retry the same upgrade after a delay instead of giving up.
+        // (Google TODO b/228610864 questions treating WIFI_LAN differently.)
+        if current_medium != Medium::WifiLan
+            && (next_medium == current_medium
+                || next_medium == Medium::UnknownMedium
+                || upgrade_mediums.is_empty())
+        {
+            self.retry_upgrades_after_delay(endpoint_id);
+            return;
+        }
+
+        // A medium with no handler was stripped out already, so this shouldn't
+        // be hit; bail rather than initiate with no handler.
+        if !self.has_handler_for_medium(next_medium) {
+            return;
+        }
+        self.set_bwu_medium_for_endpoint(endpoint_id, next_medium);
+        self.initiate_bwu_for_endpoint(client, endpoint_id, next_medium);
+    }
+
+    /// `ChooseBestUpgradeMedium` — from the remote's preference-ordered mediums,
+    /// keep the ones we can actually use, then either keep the current upgrade
+    /// medium (if still supported) or pick the most-preferred available one.
+    fn choose_best_upgrade_medium(&self, endpoint_id: &str, mediums: &[Medium]) -> Medium {
+        let available = self.strip_out_unavailable_mediums(mediums);
+        let current = self.get_bwu_medium_for_endpoint(endpoint_id);
+        if current == Medium::UnknownMedium {
+            // First upgrade attempt: take the most-preferred available medium.
+            if let Some(&first) = available.first() {
+                return first;
+            }
+        } else if available.contains(&current) {
+            // Already upgraded and the current medium is still supported.
+            return current;
+        }
+        // No first-time medium available, or the current one is no longer
+        // supported and we can't switch: give up on a concrete medium.
+        Medium::UnknownMedium
+    }
+
+    /// `StripOutUnavailableMediums` — in the port, a medium is "available" iff a
+    /// handler is registered for it (the platform radio-availability layer
+    /// `Mediums`/`IsAvailable`/`IsAPAvailable` is omitted; the consumer decides
+    /// which handlers exist). Preserves the input (preference) order.
+    fn strip_out_unavailable_mediums(&self, mediums: &[Medium]) -> Vec<Medium> {
+        mediums
+            .iter()
+            .copied()
+            .filter(|m| self.has_handler_for_medium(*m))
+            .collect()
+    }
+
+    /// Schedules a delayed retry of the upgrade for `endpoint_id`. In the
+    /// synchronous port this records the pending alarm and its computed delay;
+    /// the integration layer (Tokio actor) arms a real timer from
+    /// [`Self::pending_retry_delay`] and calls [`Self::fire_retry_alarm`] when it
+    /// elapses. Mirrors `RetryUpgradesAfterDelay`.
+    fn retry_upgrades_after_delay(&mut self, endpoint_id: &str) {
+        let delay = self.calculate_next_retry_delay(endpoint_id);
+        self.cancel_retry_upgrade_alarm(endpoint_id);
+        self.retry_upgrade_alarms
+            .insert(endpoint_id.to_string(), delay);
+        self.retry_delays.insert(endpoint_id.to_string(), delay);
+    }
+
+    /// `CalculateNextRetryDelay` — the first retry uses the initial delay; each
+    /// subsequent retry doubles (exp backoff) or adds the initial delay
+    /// (linear), capped at the configured maximum.
+    pub fn calculate_next_retry_delay(&self, endpoint_id: &str) -> Duration {
+        let initial_delay = self.config.bandwidth_upgrade_retry_delay;
+        let Some(&last) = self.retry_delays.get(endpoint_id) else {
+            return initial_delay;
+        };
+        let delay = if self.config.use_exp_backoff_in_bwu_retry {
+            last * 2
+        } else {
+            last + initial_delay
+        };
+        delay.min(self.config.bandwidth_upgrade_retry_max_delay)
+    }
+
+    /// The delay of the retry currently scheduled for `endpoint_id`, if any.
+    /// The integration layer uses this to arm a timer; `None` means no retry is
+    /// pending (never scheduled, already fired, or cancelled).
+    pub fn pending_retry_delay(&self, endpoint_id: &str) -> Option<Duration> {
+        self.retry_upgrade_alarms.get(endpoint_id).copied()
+    }
+
+    /// Fires the scheduled retry for `endpoint_id` (the integration layer calls
+    /// this when the armed timer elapses). No-op if the alarm was cancelled or
+    /// already fired, or if the endpoint is no longer connected. Mirrors the
+    /// `RetryUpgradesAfterDelay` alarm callback.
+    pub fn fire_retry_alarm(&mut self, client: &mut ClientProxy, endpoint_id: &str) {
+        // Consume the pending alarm; absence means it was cancelled (a real
+        // `CancelableAlarm` would never invoke its callback after `Cancel()`).
+        if self.retry_upgrade_alarms.remove(endpoint_id).is_none() {
+            return;
+        }
+        if !client.is_connected_to_endpoint(endpoint_id) {
+            return;
+        }
+        let mediums = client.get_upgrade_mediums(endpoint_id);
+        self.try_next_best_upgrade_mediums(client, endpoint_id, mediums);
+    }
+
+    /// `CancelRetryUpgradeAlarm` — cancels a pending retry. Note this does NOT
+    /// clear `retry_delays`, so the backoff resumes from the last delay on the
+    /// next schedule.
+    fn cancel_retry_upgrade_alarm(&mut self, endpoint_id: &str) {
+        self.retry_upgrade_alarms.remove(endpoint_id);
+    }
+
+    /// `CancelAllRetryUpgradeAlarms` — cancels every pending retry and resets all
+    /// backoff state.
+    fn cancel_all_retry_upgrade_alarms(&mut self) {
+        self.retry_upgrade_alarms.clear();
+        self.retry_delays.clear();
     }
 
     // -- endpoint disconnect / revert ---------------------------------------
@@ -582,8 +793,9 @@ impl BwuManager {
             old_channel.close_with_reason(DisconnectionReason::Shutdown);
         }
         self.in_progress_upgrades.remove(endpoint_id);
+        self.retry_delays.remove(endpoint_id);
+        self.cancel_retry_upgrade_alarm(endpoint_id);
         self.successfully_upgraded_endpoints.remove(endpoint_id);
-        // retry_delays / retry alarms omitted.
 
         if self.config.support_multiple_bwu_mediums
             || self.ecm.borrow().get_connected_endpoints_count() <= 1
@@ -628,6 +840,7 @@ impl BwuManager {
     }
 
     pub fn shutdown(&mut self) {
+        self.cancel_all_retry_upgrade_alarms();
         for handler in self.handlers.values_mut() {
             handler.revert_initiator_state();
         }
