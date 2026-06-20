@@ -13,10 +13,13 @@
 //! are being ported incrementally.
 
 pub mod channel;
+pub mod channel_manager;
 pub mod client;
 pub mod handler;
 pub mod service_id;
+pub mod testing;
 
 pub use channel::{DisconnectionReason, EndpointChannel, SafeDisconnectionResult};
+pub use channel_manager::EndpointChannelManager;
 pub use client::ClientProxy;
 pub use handler::{BaseBwuHandler, BwuHandler, IncomingSocketConnection, MediumBwuHandler};
