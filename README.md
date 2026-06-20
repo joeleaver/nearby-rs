@@ -12,6 +12,8 @@ upstream behaviour rather than to one author's understanding of it.
 
 **Phase 1 — offline wire format + validator.** Done.
 **Phase 2 — bandwidth-upgrade (BWU) state machine.** Done.
+**Phase 3 (in progress) — the BWU failure-retry machinery.** Done; the Tokio
+integration wrapper and a real medium handler are next.
 
 | Module | Ported from (google/nearby) | Tests |
 | --- | --- | --- |
@@ -19,7 +21,7 @@ upstream behaviour rather than to one author's understanding of it.
 | `src/frames.rs` | `offline_frames.cc` | `tests/offline_frames.rs` (24 golden round-trips) |
 | `src/validator.rs` | `offline_frames_validator.cc` | `tests/offline_frames_validator.rs` (36 cases) |
 | `src/mediums.rs` | `proto/connections_enums.proto` (the `Medium` / `WifiDirectAuthType` enums) | — |
-| `src/bwu/` | `bwu_manager.cc`, `base_bwu_handler.cc`, `service_id_constants.h`, the fakes | `tests/bwu_manager.rs` (23 cases) + unit tests |
+| `src/bwu/` | `bwu_manager.cc`, `base_bwu_handler.cc`, `service_id_constants.h`, the fakes | `tests/bwu_manager.rs` (23 oracle cases), `tests/bwu_retry.rs` (11 cases), unit tests |
 
 Each golden test mirrors a C++ `EXPECT_THAT(msg, EqualsProto(...))` assertion:
 build the frame with the same `for_*` call, `from_bytes()` it (which also runs
@@ -32,12 +34,17 @@ The BWU layer (`src/bwu/`) is a **plain synchronous owned state machine** — th
 C++ serial executor maps to "run inline", so the 23-case `bwu_manager_test`
 oracle stays deterministic. It drives the full upgrade handshake (pause → channel
 swap → `LAST_WRITE` → drain → `SAFE_TO_CLOSE` → close-`UPGRADED`), the early-race
-latch, the initiator/responder paths, and `OnEndpointDisconnect`/revert with both
-`support_multiple_bwu_mediums` branches. A Tokio-actor wrapper (plus the retry
-machinery and a real medium handler) is Phase 3.
+latch, the initiator/responder paths, `OnEndpointDisconnect`/revert with both
+`support_multiple_bwu_mediums` branches, and the failure-retry machinery
+(`TryNextBestUpgradeMediums` / `ChooseBestUpgradeMedium` / exponential-or-linear
+backoff). The async retry timer is exposed as a **seam** — `pending_retry_delay()`
+returns the delay a host runtime should arm a timer for, and `fire_retry_alarm()`
+is the callback to invoke when it elapses — so the core stays runtime-agnostic.
+Upstream ships no retry tests, so the retry path is pinned by hand-authored cases
+in `tests/bwu_retry.rs` instead.
 
 ```
-cargo test   # 101 tests: 24 golden + 36 validator + 23 BWU + 18 unit
+cargo test   # 112 tests: 24 golden + 36 validator + 23 BWU oracle + 11 BWU retry + 18 unit
 ```
 
 ### Why a full proto, not a subset?
@@ -53,11 +60,11 @@ vs Google's" meaningful.
 
 ## Roadmap
 
-- **Phase 3** — wrap the state machine in a Tokio actor and a concrete WIFI_LAN
-  `BwuHandler` (TcpListener), port the retry machinery
-  (`TryNextBestUpgradeMediums` / retry alarms), and route an existing
-  UKEY2 + WIFI_LAN + L2CAP stack's upgrade through this crate as the tested
-  protocol core — validated against a real device.
+- **Phase 3** — wrap the state machine in a Tokio integration actor (driving the
+  retry seam) and a concrete WIFI_LAN `BwuHandler` (TcpListener), then route an
+  existing UKEY2 + WIFI_LAN + L2CAP stack's upgrade through this crate as the
+  tested protocol core — validated against a real device. The failure-retry
+  machinery is already done.
 - **Phase 4+** — a Linux direct-medium handler (SoftAP / Wi-Fi Direct).
 
 ## License
