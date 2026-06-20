@@ -46,8 +46,13 @@ is the callback to invoke when it elapses — so the core stays runtime-agnostic
 Upstream ships no retry tests, so the retry path is pinned by hand-authored cases
 in `tests/bwu_retry.rs` instead.
 
+A concrete `EndpointChannel` — `StreamChannel` (port of `base_endpoint_channel.cc`)
+— provides the on-wire transport the upgrade swaps over: 4-byte length framing
+over a `DuplexStream` seam (a socket in production; an in-memory `Pipe` in tests),
+with encryption as a `Cipher` seam the consumer fills with its UKEY2 session.
+
 ```
-cargo test   # 112 tests: 24 golden + 36 validator + 23 BWU oracle + 11 BWU retry + 18 unit
+cargo test   # 119 tests: 24 golden + 36 validator + 23 BWU oracle + 11 BWU retry + 7 channel + 18 unit
 ```
 
 ### The Tokio actor (`features = ["tokio"]`)
@@ -76,10 +81,11 @@ vs Google's" meaningful.
 
 ## Roadmap
 
-- **Phase 3** — the failure-retry machinery and the Tokio integration actor are
-  done. Remaining: a concrete WIFI_LAN `BwuHandler` (TcpListener), then route an
-  existing UKEY2 + WIFI_LAN + L2CAP stack's upgrade through this crate as the
-  tested protocol core — validated against a real device.
+- **Phase 3** — the failure-retry machinery, the Tokio integration actor, and the
+  `StreamChannel` transport are done. Remaining: a concrete WIFI_LAN `BwuHandler`
+  (a `TcpListener` accept loop that hands `StreamChannel`-over-`TcpStream`s to the
+  actor), then route an existing UKEY2 + WIFI_LAN + L2CAP stack's upgrade through
+  this crate as the tested protocol core — validated against a real device.
 - **Phase 4+** — a Linux direct-medium handler (SoftAP / Wi-Fi Direct).
 
 ## License
