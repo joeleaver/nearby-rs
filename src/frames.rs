@@ -27,13 +27,21 @@ const STATUS_SUCCESS: i32 = 0;
 /// `internal_payload.h`: `InternalPayload::kIndeterminateSize`.
 pub const INDETERMINATE_SIZE: i64 = -1;
 
-/// Mirrors the subset of `nearby::Exception` that the frame parser/validator
-/// can produce. [`Exception::Success`] is the "no error" sentinel, matching the
-/// C++ `Exception{Exception::kSuccess}`.
+/// Mirrors `nearby::Exception` (`internal/platform/exception.h`).
+/// [`Exception::Success`] is the "no error" sentinel, matching the C++
+/// `Exception{Exception::kSuccess}`. The parser/validator only ever produce
+/// `Success`/`InvalidProtocolBuffer`/`IllegalCharacters`; the remaining
+/// variants are used by the transport seam (e.g. an `EndpointChannel` write
+/// returning `Io`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exception {
     Success,
+    Failed,
+    Io,
+    Interrupted,
     InvalidProtocolBuffer,
+    Execution,
+    Timeout,
     IllegalCharacters,
 }
 

@@ -19,6 +19,7 @@
 //!
 //! [Nearby Connections]: https://github.com/google/nearby
 
+pub mod bwu;
 pub mod frames;
 pub mod mediums;
 pub mod proto;
