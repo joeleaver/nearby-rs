@@ -1,5 +1,8 @@
 # nearby-rs
 
+[![CI](https://github.com/joeleaver/nearby-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/joeleaver/nearby-rs/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A faithful, **test-first** Rust port of [Google's Nearby Connections][nearby]
 protocol — the peer-to-peer transport that powers Quick Share.
 
@@ -12,8 +15,8 @@ upstream behaviour rather than to one author's understanding of it.
 
 **Phase 1 — offline wire format + validator.** Done.
 **Phase 2 — bandwidth-upgrade (BWU) state machine.** Done.
-**Phase 3 (in progress) — the BWU failure-retry machinery.** Done; the Tokio
-integration wrapper and a real medium handler are next.
+**Phase 3 (in progress) — failure-retry machinery + a Tokio integration actor.**
+Done; a concrete medium handler (and real-device validation) is next.
 
 | Module | Ported from (google/nearby) | Tests |
 | --- | --- | --- |
@@ -47,6 +50,19 @@ in `tests/bwu_retry.rs` instead.
 cargo test   # 112 tests: 24 golden + 36 validator + 23 BWU oracle + 11 BWU retry + 18 unit
 ```
 
+### The Tokio actor (`features = ["tokio"]`)
+
+Google's design requires a *single owner* applying every frame, connection
+event, and timer in strict order — apply them concurrently and the upgrade
+handshake reorders and wedges. The optional `bwu::actor` provides that owner: a
+`Send` actor that owns the state machine and takes work as messages over a
+channel, closing the retry seam by arming a real `tokio` timer. The core crate
+stays dependency-free; only this feature pulls in Tokio.
+
+```
+cargo test --all-features   # + 5 actor tests (deterministic, paused-clock)
+```
+
 ### Why a full proto, not a subset?
 
 The vendored `offline_wire_formats.proto` is kept **byte-for-byte faithful** to
@@ -60,11 +76,10 @@ vs Google's" meaningful.
 
 ## Roadmap
 
-- **Phase 3** — wrap the state machine in a Tokio integration actor (driving the
-  retry seam) and a concrete WIFI_LAN `BwuHandler` (TcpListener), then route an
+- **Phase 3** — the failure-retry machinery and the Tokio integration actor are
+  done. Remaining: a concrete WIFI_LAN `BwuHandler` (TcpListener), then route an
   existing UKEY2 + WIFI_LAN + L2CAP stack's upgrade through this crate as the
-  tested protocol core — validated against a real device. The failure-retry
-  machinery is already done.
+  tested protocol core — validated against a real device.
 - **Phase 4+** — a Linux direct-medium handler (SoftAP / Wi-Fi Direct).
 
 ## License
