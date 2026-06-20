@@ -43,6 +43,9 @@ pub enum Exception {
     Execution,
     Timeout,
     IllegalCharacters,
+    /// `kNoData` — a stream reached EOF / was closed before the requested bytes
+    /// were available (distinct from a transport `Io` error).
+    NoData,
 }
 
 impl Exception {

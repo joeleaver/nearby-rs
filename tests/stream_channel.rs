@@ -112,10 +112,23 @@ fn try_decrypt_behaviour() {
 }
 
 #[test]
-fn read_after_close_returns_io() {
+fn empty_decrypt_result_is_rejected() {
+    // A successful decrypt that yields nothing is an error (C++ `result.Empty()`
+    // guard), unlike a legitimately empty *unencrypted* frame.
+    let ch = channel("emptydec");
+    ch.enable_encryption(Arc::new(MarkerCipher));
+    // `encode(b"")` is just the marker byte; `decode` of it yields an empty body.
+    assert_eq!(ch.write(b""), Exception::Success);
+    assert_eq!(ch.read(), Err(Exception::InvalidProtocolBuffer));
+}
+
+#[test]
+fn read_after_close_returns_no_data() {
+    // Mirrors the C++ `ReadAfterInputStreamClosed`, which asserts `kNoData`
+    // (EOF), distinct from a transport `kIo` error.
     let ch = channel("closed");
     ch.close();
-    assert_eq!(ch.read(), Err(Exception::Io));
+    assert_eq!(ch.read(), Err(Exception::NoData));
     // Closing again is idempotent.
     ch.close();
 }

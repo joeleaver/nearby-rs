@@ -14,7 +14,9 @@
 //! calling thread, as Google's dedicated reader threads expect) and uses interior
 //! mutability so it can be shared as `Arc<dyn EndpointChannel>`. `close` does not
 //! take the reader/writer locks (a read/write may be in progress); it closes the
-//! underlying stream, which unblocks the in-flight call with [`Exception::Io`].
+//! underlying stream, which unblocks an in-flight read with [`Exception::NoData`]
+//! (EOF) — matching the C++ `kNoData` — or, on a genuine transport error,
+//! [`Exception::Io`].
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -37,10 +39,11 @@ pub trait Cipher: Send + Sync {
 /// The blocking byte-transport seam under a [`StreamChannel`] (the C++
 /// `InputStream`/`OutputStream` pair). Methods take `&self`; an implementation
 /// is internally synchronized and shareable. `close` must interrupt any blocked
-/// `read_exact`/`write_all` (so an in-progress channel read returns
-/// [`Exception::Io`]).
+/// `read_exact`/`write_all` (so an in-progress channel read returns).
 pub trait DuplexStream: Send + Sync {
-    /// Block until exactly `buf.len()` bytes are read. `Err(Io)` on EOF/close.
+    /// Block until exactly `buf.len()` bytes are read. `Err(NoData)` if the
+    /// stream reaches EOF / is closed first (the C++ `ReadExactly` `kNoData`);
+    /// `Err(Io)` on a transport error.
     fn read_exact(&self, buf: &mut [u8]) -> Result<(), Exception>;
     /// Write every byte. `Err(Io)` on error/close.
     fn write_all(&self, buf: &[u8]) -> Result<(), Exception>;
@@ -154,6 +157,11 @@ impl EndpointChannel for StreamChannel {
             return Ok(raw);
         };
         if let Some(plaintext) = cipher.decode(&raw) {
+            // A successful-but-empty decrypt is treated as an error, mirroring
+            // the C++ `if (result.Empty())` guard on the encrypted path.
+            if plaintext.is_empty() {
+                return Err(Exception::InvalidProtocolBuffer);
+            }
             return Ok(plaintext);
         }
         // Decrypt failed. It may be a protocol race where the peer sent a
@@ -161,7 +169,12 @@ impl EndpointChannel for StreamChannel {
         // frame through, otherwise the frame is unreadable.
         match from_bytes(&raw) {
             Ok(frame) if get_frame_type(&frame) == pb::v1_frame::FrameType::KeepAlive => Ok(raw),
-            _ => Err(Exception::InvalidProtocolBuffer),
+            // Parsed but not a KEEP_ALIVE: C++ keeps the default
+            // `kInvalidProtocolBuffer`.
+            Ok(_) => Err(Exception::InvalidProtocolBuffer),
+            // Parse/validation failed: forward the validator's specific code
+            // (e.g. `IllegalCharacters`), as C++ does via `parsed.exception()`.
+            Err(exception) => Err(exception),
         }
     }
 
@@ -295,7 +308,8 @@ impl DuplexStream for Pipe {
         while filled < buf.len() {
             if state.buf.is_empty() {
                 if state.closed {
-                    return Err(Exception::Io);
+                    // EOF before the requested bytes — `kNoData`, not `kIo`.
+                    return Err(Exception::NoData);
                 }
                 state = self.cond.wait(state).unwrap();
                 continue;
