@@ -17,7 +17,7 @@
 //! `tests/wifi_lan.rs`.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -110,13 +110,33 @@ struct Listener {
 /// The WIFI_LAN bandwidth-upgrade handler.
 pub struct WifiLanBwuHandler {
     sink: ConnectionSink,
+    /// What the accept listener binds to. `0.0.0.0` accepts on every interface;
+    /// `127.0.0.1` (the default) is loopback-only, for tests / same-host use.
+    bind_ip: Ipv4Addr,
+    /// The routable IPv4 address advertised in `UPGRADE_PATH_AVAILABLE` — the
+    /// address the remote peer actually dials. Distinct from `bind_ip` because a
+    /// real device must advertise the LAN IP (you can't advertise `0.0.0.0`).
+    advertise_ip: Ipv4Addr,
     listeners: HashMap<String, Listener>,
 }
 
 impl WifiLanBwuHandler {
+    /// Loopback handler: binds and advertises `127.0.0.1`. Fine for tests and
+    /// same-host upgrades; a remote phone cannot reach loopback — use
+    /// [`WifiLanBwuHandler::with_endpoint`] for that.
     pub fn new(sink: ConnectionSink) -> Self {
+        Self::with_endpoint(sink, Ipv4Addr::LOCALHOST, Ipv4Addr::LOCALHOST)
+    }
+
+    /// Bind the accept listener to `bind_ip` (e.g. `0.0.0.0` to accept on every
+    /// interface) and advertise `advertise_ip` (the routable LAN address the
+    /// remote peer dials) in the `UPGRADE_PATH_AVAILABLE` frame. Use this for a
+    /// real device upgrade.
+    pub fn with_endpoint(sink: ConnectionSink, bind_ip: Ipv4Addr, advertise_ip: Ipv4Addr) -> Self {
         Self {
             sink,
+            bind_ip,
+            advertise_ip,
             listeners: HashMap::new(),
         }
     }
@@ -164,7 +184,7 @@ impl MediumBwuHandler for WifiLanBwuHandler {
         let addr = match self.listeners.get(upgrade_service_id) {
             Some(listener) => listener.addr,
             None => {
-                let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
+                let listener = match TcpListener::bind((self.bind_ip, 0)) {
                     Ok(listener) => listener,
                     Err(_) => return Vec::new(), // EMPTY = MEDIUM_ERROR
                 };
@@ -193,11 +213,10 @@ impl MediumBwuHandler for WifiLanBwuHandler {
             }
         };
 
-        let IpAddr::V4(ipv4) = addr.ip() else {
-            return Vec::new();
-        };
+        // Advertise the routable IP (not the bind IP, which may be 0.0.0.0) with
+        // the port the OS actually assigned.
         for_bwu_wifi_lan_path_available(&[ServiceAddress {
-            address: ipv4.octets().to_vec(),
+            address: self.advertise_ip.octets().to_vec(),
             port: i32::from(addr.port()),
         }])
     }
