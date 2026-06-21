@@ -21,7 +21,9 @@ pub mod handler;
 pub mod manager;
 pub mod service_id;
 pub mod stream_channel;
+pub mod tcp;
 pub mod testing;
+pub mod wifi_hotspot;
 pub mod wifi_lan;
 
 #[cfg(feature = "tokio")]
@@ -32,4 +34,6 @@ pub use client::ClientProxy;
 pub use handler::{BaseBwuHandler, BwuHandler, IncomingSocketConnection, MediumBwuHandler};
 pub use manager::{BwuConfig, BwuManager};
 pub use stream_channel::{Cipher, DuplexStream, Pipe, StreamChannel};
-pub use wifi_lan::{ConnectionSink, TcpDuplexStream, WifiLanBwuHandler};
+pub use tcp::{ConnectionSink, TcpDuplexStream};
+pub use wifi_hotspot::{FakeSoftAp, HotspotCreds, SoftAp, WifiHotspotBwuHandler};
+pub use wifi_lan::WifiLanBwuHandler;
