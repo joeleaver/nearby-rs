@@ -487,11 +487,21 @@ impl BwuManager {
             channel.close();
             return;
         }
-        let endpoint_id = introduction.endpoint_id.clone().unwrap_or_default();
+        let introduced_id = introduction.endpoint_id.clone().unwrap_or_default();
         // (Dynamic role-switch last_endpoint_id aliasing omitted.)
-        if !self.in_progress_upgrades.contains(&endpoint_id) {
+        // The remote's CLIENT_INTRODUCTION carries ITS local endpoint id, which a
+        // consumer that keyed the upgrade by a different id (e.g. it doesn't know the
+        // remote's local id) won't have in `in_progress_upgrades`. With exactly one
+        // upgrade in flight the target is unambiguous, so adopt the in-progress id
+        // (which the ecm + handler state are all keyed under). Multi-endpoint still
+        // requires the exact match.
+        let endpoint_id = if self.in_progress_upgrades.contains(&introduced_id) {
+            introduced_id
+        } else if self.in_progress_upgrades.len() == 1 {
+            self.in_progress_upgrades.iter().next().cloned().unwrap()
+        } else {
             return;
-        }
+        };
         // The upgrade connected, so any pending retry for it is moot (bwu_manager.cc:686).
         self.cancel_retry_upgrade_alarm(&endpoint_id);
         let enable_encryption = !introduction.supports_disabling_encryption.unwrap_or(false);
