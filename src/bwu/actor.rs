@@ -123,6 +123,14 @@ pub enum BwuCommand {
     BandwidthChangedEvents {
         reply: oneshot::Sender<Vec<(String, Medium)>>,
     },
+    /// The channel currently registered for `endpoint_id`. After a converged
+    /// upgrade this is the new (upgraded) channel, which the consumer needs to
+    /// continue the transfer on the upgraded medium — the actor otherwise keeps
+    /// it private. `None` if the endpoint has no registered channel.
+    GetUpgradedChannel {
+        endpoint_id: String,
+        reply: oneshot::Sender<Option<Arc<dyn EndpointChannel>>>,
+    },
 }
 
 /// A cheap, `Send + Sync` handle for driving a [`BwuActor`] from any task/thread.
@@ -295,6 +303,20 @@ impl BwuHandle {
             .await
             .unwrap_or_default()
     }
+
+    /// The channel currently registered for `endpoint_id`. After a converged
+    /// upgrade — observed via [`BwuHandle::bandwidth_changed_events`] — this is
+    /// the new upgraded channel; the consumer retrieves it here to continue the
+    /// transfer on the upgraded medium. `None` if the endpoint has no channel.
+    pub async fn get_upgraded_channel(
+        &self,
+        endpoint_id: impl Into<String>,
+    ) -> Option<Arc<dyn EndpointChannel>> {
+        let endpoint_id = endpoint_id.into();
+        self.query(|reply| BwuCommand::GetUpgradedChannel { endpoint_id, reply })
+            .await
+            .flatten()
+    }
 }
 
 /// The owning side of the actor. Construct with [`BwuActor::new`] (or
@@ -464,6 +486,16 @@ impl BwuActor {
             }
             BwuCommand::BandwidthChangedEvents { reply } => {
                 let _ = reply.send(self.client.bandwidth_changed_events().to_vec());
+            }
+            BwuCommand::GetUpgradedChannel { endpoint_id, reply } => {
+                // Lock the ecm only for the clone — never across the reply/await,
+                // so the actor's run future stays Send and can't deadlock.
+                let channel = self
+                    .ecm
+                    .lock()
+                    .unwrap()
+                    .get_channel_for_endpoint(&endpoint_id);
+                let _ = reply.send(channel);
             }
             // Handled in `run` before dispatch.
             BwuCommand::Shutdown => unreachable!("Shutdown is handled in run()"),

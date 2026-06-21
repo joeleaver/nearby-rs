@@ -168,6 +168,16 @@ async fn full_upgrade_handshake_through_the_actor() {
         DisconnectionReason::Upgraded
     );
     assert!(!upgraded.is_paused());
+
+    // The consumer retrieves the upgraded channel to continue the transfer on
+    // the new medium — it is the WebRtc channel now, not the closed Bluetooth
+    // one — and an unknown endpoint yields None.
+    let continued = handle
+        .get_upgraded_channel(E1)
+        .await
+        .expect("upgraded channel is retrievable after convergence");
+    assert_eq!(continued.medium(), Medium::WebRtc);
+    assert!(handle.get_upgraded_channel("Unknown").await.is_none());
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
