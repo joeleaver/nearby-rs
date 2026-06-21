@@ -70,6 +70,24 @@ fn encrypted_round_trips() {
 }
 
 #[test]
+fn enable_encryption_works_through_the_trait_object() {
+    // The consumer holds the swapped channel as `Arc<dyn EndpointChannel>` (that is
+    // what the actor's `GetUpgradedChannel` hands back), so it must be able to
+    // install its cipher via the trait method, not just the inherent one.
+    let ch: Arc<dyn EndpointChannel> = channel("dyn-enc");
+    assert_eq!(ch.write(b"plain"), Exception::Success);
+    assert_eq!(ch.read().unwrap(), b"plain");
+
+    ch.enable_encryption(Arc::new(MarkerCipher));
+    assert_eq!(ch.write(b"secret"), Exception::Success);
+    assert_eq!(ch.read().unwrap(), b"secret");
+
+    ch.disable_encryption();
+    assert_eq!(ch.write(b"plain again"), Exception::Success);
+    assert_eq!(ch.read().unwrap(), b"plain again");
+}
+
+#[test]
 fn encrypted_payload_is_ciphertext_on_the_wire() {
     // A second, unencrypted channel sharing the same pipe sees the raw framed
     // bytes — they must be ciphertext, not the plaintext (cannot be intercepted).

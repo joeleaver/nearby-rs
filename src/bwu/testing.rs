@@ -10,6 +10,7 @@ use crate::bwu::channel::{DisconnectionReason, EndpointChannel};
 use crate::bwu::client::ClientProxy;
 use crate::bwu::handler::{IncomingSocketConnection, MediumBwuHandler};
 use crate::bwu::manager::BwuManager;
+use crate::bwu::stream_channel::Cipher;
 use crate::frames::{
     for_bwu_bluetooth_path_available, for_bwu_introduction, for_bwu_webrtc_path_available,
     for_bwu_wifi_direct_path_available, for_bwu_wifi_hotspot_path_available,
@@ -133,6 +134,7 @@ impl EndpointChannel for FakeEndpointChannel {
     fn is_paused(&self) -> bool {
         self.state.lock().unwrap().is_paused
     }
+    fn enable_encryption(&self, _cipher: Arc<dyn Cipher>) {}
     fn disable_encryption(&self) {}
 }
 

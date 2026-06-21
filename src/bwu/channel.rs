@@ -4,6 +4,9 @@
 //! BWU state machine actually uses — see the porting spec) and the
 //! `DisconnectionReason` enum from `proto/connections_enums.proto`.
 
+use std::sync::Arc;
+
+use crate::bwu::stream_channel::Cipher;
 use crate::frames::Exception;
 use crate::mediums::Medium;
 
@@ -53,5 +56,13 @@ pub trait EndpointChannel: Send + Sync {
     fn pause(&self);
     fn resume(&self);
     fn is_paused(&self) -> bool;
+    /// `EnableEncryption` — route subsequent reads/writes through `cipher`. The BWU
+    /// state machine itself does not call this (the upgraded channel is handed back
+    /// plaintext — see `EndpointChannelManager::replace_channel_for_endpoint`); it
+    /// is exposed on the trait so a *consumer* holding the swapped
+    /// `Arc<dyn EndpointChannel>` (e.g. from the Tokio actor's `GetUpgradedChannel`)
+    /// can install its UKEY2 cipher to continue an encrypted transfer on the new
+    /// medium with a continuous sequence.
+    fn enable_encryption(&self, cipher: Arc<dyn Cipher>);
     fn disable_encryption(&self);
 }

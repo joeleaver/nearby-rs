@@ -269,6 +269,12 @@ impl EndpointChannel for StreamChannel {
         self.pause.lock().unwrap().paused
     }
 
+    // Same body as the inherent `enable_encryption` above; exposed on the trait so
+    // a consumer holding an `Arc<dyn EndpointChannel>` can install a cipher.
+    fn enable_encryption(&self, cipher: Arc<dyn Cipher>) {
+        *self.cipher.lock().unwrap() = Some(cipher);
+    }
+
     fn disable_encryption(&self) {
         *self.cipher.lock().unwrap() = None;
     }
