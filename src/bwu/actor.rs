@@ -88,6 +88,9 @@ pub enum BwuCommand {
     // --- BWU operations ---
     /// Initiator: start an upgrade to `medium`.
     InitiateBwu { endpoint_id: String, medium: Medium },
+    /// Clear a stuck in-progress upgrade (without reverting the handler) so a
+    /// following `InitiateBwu` re-offers — for a remote retry with no failure.
+    ResetUpgrade { endpoint_id: String },
     /// Feed an incoming `BANDWIDTH_UPGRADE_NEGOTIATION` frame.
     IncomingFrame {
         frame: Box<pb::OfflineFrame>,
@@ -231,6 +234,18 @@ impl BwuHandle {
         self.fire(BwuCommand::InitiateBwu {
             endpoint_id: endpoint_id.into(),
             medium,
+        })
+        .await;
+    }
+
+    /// Clear a stuck in-progress upgrade for `endpoint_id` so a following
+    /// [`initiate_bwu`](Self::initiate_bwu) re-offers (reusing the standing medium).
+    /// For a remote `BANDWIDTH_UPGRADE_RETRY` that arrived without an
+    /// `UPGRADE_FAILURE`. Fire-and-forget; the consumer follows it with
+    /// `initiate_bwu`.
+    pub async fn reset_upgrade(&self, endpoint_id: impl Into<String>) {
+        self.fire(BwuCommand::ResetUpgrade {
+            endpoint_id: endpoint_id.into(),
         })
         .await;
     }
@@ -458,6 +473,9 @@ impl BwuActor {
             } => self
                 .manager
                 .initiate_bwu_for_endpoint(&mut self.client, &endpoint_id, medium),
+            BwuCommand::ResetUpgrade { endpoint_id } => {
+                self.manager.reset_upgrade_for_endpoint(&endpoint_id)
+            }
             BwuCommand::IncomingFrame {
                 frame,
                 endpoint_id,

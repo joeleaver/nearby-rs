@@ -309,6 +309,51 @@ fn initiate_bwu_success(support_multiple: bool) {
     );
 }
 
+/// A bare remote retry (BANDWIDTH_UPGRADE_RETRY with no preceding UPGRADE_FAILURE):
+/// the `in_progress_upgrades` guard would drop a re-offer, so the initiator calls
+/// `reset_upgrade_for_endpoint` to clear it, then re-initiates. The re-offer must
+/// re-run `handle_initialize` (re-sending UPGRADE_PATH_AVAILABLE, reusing the
+/// standing medium) WITHOUT ever calling revert — so a SoftAP that took seconds to
+/// bring up is reused, not torn down and rebuilt. Covers #23.
+#[test]
+fn reset_upgrade_reoffers_without_reverting_the_medium() {
+    let mut f = fixture(false);
+    let _initial = f.create_initial_endpoint(SERVICE_A, ENDPOINT_1, Medium::Bluetooth);
+
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WebRtc);
+    assert!(f.bwu.is_upgrade_ongoing(ENDPOINT_1));
+    assert_eq!(f.web_rtc.lock().unwrap().handle_initialize_calls.len(), 1);
+
+    // A re-initiate WITHOUT a reset is dropped by the in-progress guard (the #23 bug).
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WebRtc);
+    assert_eq!(
+        f.web_rtc.lock().unwrap().handle_initialize_calls.len(),
+        1,
+        "the in-progress guard drops a re-offer"
+    );
+
+    // Reset clears the in-progress flag WITHOUT reverting the handler...
+    f.bwu.reset_upgrade_for_endpoint(ENDPOINT_1);
+    assert!(!f.bwu.is_upgrade_ongoing(ENDPOINT_1));
+
+    // ...so a re-initiate now re-sends the offer (handle_initialize runs again).
+    f.bwu
+        .initiate_bwu_for_endpoint(&mut f.client, ENDPOINT_1, Medium::WebRtc);
+    assert!(f.bwu.is_upgrade_ongoing(ENDPOINT_1));
+    let r = f.web_rtc.lock().unwrap();
+    assert_eq!(
+        r.handle_initialize_calls.len(),
+        2,
+        "the re-offer re-initializes the (reused) medium"
+    );
+    assert!(
+        r.handle_revert_calls.is_empty(),
+        "reset must NOT revert/tear down the medium (no SoftAP churn)"
+    );
+}
+
 #[test]
 fn initiate_bwu_success_flag_disabled() {
     initiate_bwu_success(false);

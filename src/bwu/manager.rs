@@ -255,6 +255,23 @@ impl BwuManager {
         self.in_progress_upgrades.insert(endpoint_id.to_string());
     }
 
+    /// Clear the in-progress flag for `endpoint_id` WITHOUT reverting the medium
+    /// handler — the standing listener / SoftAP stays up. A following
+    /// [`initiate_bwu_for_endpoint`](Self::initiate_bwu_for_endpoint) then re-sends
+    /// the `UPGRADE_PATH_AVAILABLE` offer, reusing the standing medium.
+    ///
+    /// This exists for the case where the remote asks to retry the upgrade (a
+    /// `BANDWIDTH_UPGRADE_RETRY` frame) WITHOUT first having sent an
+    /// `UPGRADE_FAILURE`. The reference clears the in-progress state only via the
+    /// failure path, so a bare retry would hit the `in_progress_upgrades` guard in
+    /// `initiate_bwu_for_endpoint` and the re-offer would be silently dropped. The
+    /// initiator (consumer) calls this before re-initiating so the re-offer is not
+    /// lost — and because it does not revert, the medium (e.g. a SoftAP that took
+    /// seconds to bring up) is reused rather than torn down and rebuilt.
+    pub fn reset_upgrade_for_endpoint(&mut self, endpoint_id: &str) {
+        self.in_progress_upgrades.remove(endpoint_id);
+    }
+
     // -- incoming-frame dispatch -------------------------------------------
 
     /// `EndpointManager::FrameProcessor` entry for `BANDWIDTH_UPGRADE_NEGOTIATION`.
